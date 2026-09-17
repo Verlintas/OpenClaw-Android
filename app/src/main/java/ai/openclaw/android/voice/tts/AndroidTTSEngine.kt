@@ -58,6 +58,7 @@ class AndroidTTSEngine(
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
                 override fun onDone(utteranceId: String?) { if (cont.isActive) cont.resume(Unit) }
+                @Suppress("OVERRIDE_DEPRECATION")
                 override fun onError(utteranceId: String?) { if (cont.isActive) cont.resume(Unit) }
             })
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)

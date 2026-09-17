@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -164,7 +165,7 @@ private fun DemoScreen(service: A2UIService, actionLog: List<String>) {
                         service.processMessage("""{"version":"v0.9","deleteSurface":{"surfaceId":"$id"}}""")
                     }
                 }) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("返回菜单")
                 }

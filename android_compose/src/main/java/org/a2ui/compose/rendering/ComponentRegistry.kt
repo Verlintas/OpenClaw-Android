@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -646,7 +647,7 @@ class ComponentRegistry(private val renderer: A2UIRenderer) {
                             themeConfig = themeConfig
                         )
                         Icon(
-                            imageVector = if (isPositive) Icons.Default.TrendingUp else Icons.Default.TrendingDown,
+                            imageVector = if (isPositive) Icons.AutoMirrored.Filled.TrendingUp else Icons.AutoMirrored.Filled.TrendingDown,
                             contentDescription = if (isPositive) "上涨" else "下跌",
                             tint = if (isPositive) Color(0xFF4CAF50) else Color(0xFFF44336)
                         )
@@ -1366,7 +1367,7 @@ class ComponentRegistry(private val renderer: A2UIRenderer) {
                                             enter = fadeIn() + slideInVertically(),
                                             exit = fadeOut() + slideOutVertically()
                                         ) {
-                                            Divider(modifier = Modifier.fillMaxWidth())
+                                            HorizontalDivider(modifier = Modifier.fillMaxWidth())
                                             contentChildId?.let { contentId ->
                                                 renderer.getComponent(context.surfaceId, contentId)?.let { contentComponent ->
                                                     Box(modifier = Modifier.padding(16.dp)) {
@@ -1427,7 +1428,7 @@ class ComponentRegistry(private val renderer: A2UIRenderer) {
                                             enter = fadeIn() + slideInVertically(),
                                             exit = fadeOut() + slideOutVertically()
                                         ) {
-                                            Divider(modifier = Modifier.fillMaxWidth())
+                                            HorizontalDivider(modifier = Modifier.fillMaxWidth())
                                             contentChildId?.let { contentId ->
                                                 renderer.getComponent(context.surfaceId, contentId)?.let { contentComponent ->
                                                     Box(modifier = Modifier.padding(16.dp)) {
@@ -2169,8 +2170,8 @@ private fun ComponentRegistry.registerAIComponents() {
 private val ICON_MAP = mapOf(
     "accountCircle" to Icons.Default.AccountCircle,
     "add" to Icons.Default.Add,
-    "arrowBack" to Icons.Default.ArrowBack,
-    "arrowForward" to Icons.Default.ArrowForward,
+    "arrowBack" to Icons.AutoMirrored.Filled.ArrowBack,
+    "arrowForward" to Icons.AutoMirrored.Filled.ArrowForward,
     "attachFile" to Icons.Default.AttachFile,
     "calendarToday" to Icons.Default.DateRange,
     "call" to Icons.Default.Call,
@@ -2186,7 +2187,7 @@ private val ICON_MAP = mapOf(
     "favorite" to Icons.Default.Favorite,
     "favoriteOff" to Icons.Default.FavoriteBorder,
     "folder" to Icons.Default.Folder,
-    "help" to Icons.Default.Help,
+    "help" to Icons.AutoMirrored.Filled.Help,
     "home" to Icons.Default.Home,
     "info" to Icons.Default.Info,
     "locationOn" to Icons.Default.LocationOn,
@@ -2208,23 +2209,23 @@ private val ICON_MAP = mapOf(
     "refresh" to Icons.Default.Refresh,
     "rewind" to Icons.Default.FastRewind,
     "search" to Icons.Default.Search,
-    "send" to Icons.Default.Send,
+    "send" to Icons.AutoMirrored.Filled.Send,
     "settings" to Icons.Default.Settings,
     "share" to Icons.Default.Share,
     "shoppingCart" to Icons.Default.ShoppingCart,
     "skipNext" to Icons.Default.SkipNext,
     "skipPrevious" to Icons.Default.SkipPrevious,
     "star" to Icons.Default.Star,
-    "starHalf" to Icons.Default.StarHalf,
+    "starHalf" to Icons.AutoMirrored.Filled.StarHalf,
     "starOff" to Icons.Default.StarBorder,
     "stop" to Icons.Default.Stop,
     "upload" to Icons.Default.Upload,
     "visibility" to Icons.Default.Visibility,
     "visibilityOff" to Icons.Default.VisibilityOff,
-    "volumeDown" to Icons.Default.VolumeDown,
-    "volumeMute" to Icons.Default.VolumeMute,
-    "volumeOff" to Icons.Default.VolumeOff,
-    "volumeUp" to Icons.Default.VolumeUp,
+    "volumeDown" to Icons.AutoMirrored.Filled.VolumeDown,
+    "volumeMute" to Icons.AutoMirrored.Filled.VolumeMute,
+    "volumeOff" to Icons.AutoMirrored.Filled.VolumeOff,
+    "volumeUp" to Icons.AutoMirrored.Filled.VolumeUp,
     "warning" to Icons.Default.Warning,
     // weather icons
     "sunny" to Icons.Default.WbSunny,
@@ -2238,8 +2239,8 @@ private val ICON_MAP = mapOf(
     "wbCloudy" to Icons.Default.WbCloudy,
     "wbSunny" to Icons.Default.WbSunny,
     // legacy snake_case fallbacks
-    "arrow_back" to Icons.Default.ArrowBack,
-    "arrow_forward" to Icons.Default.ArrowForward,
+    "arrow_back" to Icons.AutoMirrored.Filled.ArrowBack,
+    "arrow_forward" to Icons.AutoMirrored.Filled.ArrowForward,
     "play_arrow" to Icons.Default.PlayArrow,
     "more_vert" to Icons.Default.MoreVert,
     "more_horiz" to Icons.Default.MoreHoriz,

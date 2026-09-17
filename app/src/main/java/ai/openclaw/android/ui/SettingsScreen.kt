@@ -17,7 +17,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -64,7 +63,6 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     // 在函数顶部一次性获取，避免在深层 if (logExpanded) 子作用域里取不到
-    val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
     Column(
@@ -371,7 +369,8 @@ fun SettingsScreen(
                         TextButton(
                             onClick = {
                                 val text = LogManager.shared.getAllAsText()
-                                clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(text))
+                                val clip = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clip.setPrimaryClip(android.content.ClipData.newPlainText(null, text))
                                 val count = LogManager.shared.logs.value.size
                                 Toast.makeText(
                                     context,

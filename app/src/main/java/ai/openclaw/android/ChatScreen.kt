@@ -23,17 +23,19 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -46,14 +48,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import android.graphics.Rect
 import android.view.ViewTreeObserver
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -130,9 +130,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -289,7 +287,6 @@ fun ChatScreen(
     val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     // 图片输入状态
     var selectedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -453,7 +450,7 @@ fun ChatScreen(
                     if (onOpenDrawer != null) {
                         IconButton(onClick = onOpenDrawer) {
                             Icon(
-                                imageVector = Icons.Filled.Sort,
+                                imageVector = Icons.AutoMirrored.Filled.Sort,
                                 contentDescription = "打开会话列表",
                                 tint = SciFiOnBackground,
                                 modifier = Modifier.size(22.dp)
@@ -740,7 +737,7 @@ fun ChatScreen(
                                 .semantics { contentDescription = "send_button" }
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Send,
+                                imageVector = Icons.AutoMirrored.Filled.Send,
                                 contentDescription = "发送",
                                 tint = if (sendEnabled) SciFiPrimary
                                 else SciFiOnSurfaceVariant.copy(alpha = 0.38f)
@@ -753,7 +750,7 @@ fun ChatScreen(
                             modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Mic,
+                                imageVector = Icons.Filled.Mic,
                                 contentDescription = "长按说话",
                                 modifier = Modifier.size(20.dp),
                                 tint = if (isRecording) SciFiPrimary else SciFiOnSurfaceVariant
@@ -1101,9 +1098,9 @@ fun SessionListItem(
                 // 状态图标
                 Icon(
                     imageVector = when (session.status) {
-                        SessionStatus.ACTIVE -> Icons.Default.Chat
-                        SessionStatus.COMPRESSED -> Icons.Default.History
-                        SessionStatus.ARCHIVED -> Icons.Default.Folder
+                        SessionStatus.ACTIVE -> Icons.AutoMirrored.Filled.Chat
+                        SessionStatus.COMPRESSED -> Icons.Filled.History
+                        SessionStatus.ARCHIVED -> Icons.Filled.Folder
                     },
                     contentDescription = null,
                     tint = if (isActive) SciFiPrimary else SciFiOnSurfaceVariant,
@@ -1248,7 +1245,7 @@ fun MessageBubble(
     richContent: RichContent? = null
 ) {
     val isUser = message.role == "user"
-    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState()
     var showMenu by remember { mutableStateOf(false) }
 
@@ -1268,18 +1265,19 @@ fun MessageBubble(
                             .background(SciFiOutlineVariant, RoundedCornerShape(2.dp))
                     )
                 }
-                BottomMenuOption(Icons.Default.ContentCopy, "复制") {
-                    clipboardManager.setText(AnnotatedString(message.content))
+                BottomMenuOption(Icons.Filled.ContentCopy, "复制") {
+                    val clip = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clip.setPrimaryClip(android.content.ClipData.newPlainText(null, message.content))
                     showMenu = false
                 }
                 if (!isUser) {
-                    BottomMenuOption(Icons.Default.VolumeUp, "语音播报") {
+                    BottomMenuOption(Icons.AutoMirrored.Filled.VolumeUp, "语音播报") {
                         onSpeakText?.invoke(message.content)
                         showMenu = false
                     }
-                    BottomMenuOption(Icons.Default.Refresh, "重新生成") { showMenu = false }
+                    BottomMenuOption(Icons.Filled.Refresh, "重新生成") { showMenu = false }
                 }
-                BottomMenuOption(Icons.Default.Share, "分享") { showMenu = false }
+                BottomMenuOption(Icons.Filled.Share, "分享") { showMenu = false }
                 BottomMenuOption(Icons.Default.Delete, "删除", tint = SciFiError) { showMenu = false }
             }
         }
@@ -1454,7 +1452,7 @@ private fun AiMessageBubble(
                         modifier = Modifier.size(24.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.VolumeUp,
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                             contentDescription = "语音播报",
                             tint = SciFiPrimary,
                             modifier = Modifier.size(16.dp)
@@ -1683,7 +1681,7 @@ fun VoiceStateIndicator(
             when (voiceState) {
                 VoiceState.Listening -> {
                     Icon(
-                        imageVector = Icons.Default.Mic,
+                        imageVector = Icons.Filled.Mic,
                         contentDescription = "Listening",
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(24.dp)
@@ -1708,7 +1706,7 @@ fun VoiceStateIndicator(
                 }
                 VoiceState.Speaking -> {
                     Icon(
-                        imageVector = Icons.Default.VolumeUp,
+                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = "Speaking",
                         tint = MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.size(24.dp)
@@ -1746,10 +1744,10 @@ fun VoiceButton(
     IconButton(onClick = onClick) {
         Icon(
             imageVector = when (voiceState) {
-                VoiceState.Listening -> Icons.Default.Mic
-                VoiceState.Speaking -> Icons.Default.VolumeUp
-                VoiceState.Processing -> Icons.Default.Mic
-                else -> Icons.Default.Mic
+                VoiceState.Listening -> Icons.Filled.Mic
+                VoiceState.Speaking -> Icons.AutoMirrored.Filled.VolumeUp
+                VoiceState.Processing -> Icons.Filled.Mic
+                else -> Icons.Filled.Mic
             },
             contentDescription = when (voiceState) {
                 VoiceState.Listening -> "Stop listening"

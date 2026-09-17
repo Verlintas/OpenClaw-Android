@@ -24,7 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -318,9 +318,9 @@ fun SessionListItem(
                 // 状态图标
                 Icon(
                     imageVector = when (session.status) {
-                        SessionStatus.ACTIVE -> Icons.Default.Chat
-                        SessionStatus.COMPRESSED -> Icons.Default.History
-                        SessionStatus.ARCHIVED -> Icons.Default.Folder
+                        SessionStatus.ACTIVE -> Icons.AutoMirrored.Filled.Chat
+                        SessionStatus.COMPRESSED -> Icons.Filled.History
+                        SessionStatus.ARCHIVED -> Icons.Filled.Folder
                     },
                     contentDescription = null,
                     tint = if (isActive) SciFiPrimary else SciFiOnSurfaceVariant,

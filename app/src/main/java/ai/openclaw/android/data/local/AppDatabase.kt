@@ -175,6 +175,7 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        @Suppress("DEPRECATION")
         private fun buildDatabase(context: Context): AppDatabase {
             val keyManager = SecurityKeyManager(context)
             val passphrase = keyManager.getOrCreateDatabaseKey()

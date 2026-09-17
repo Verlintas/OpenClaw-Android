@@ -239,7 +239,7 @@ fun AnimatedProgressIndicator(
     )
 
     LinearProgressIndicator(
-        progress = animatedProgress,
+        progress = { animatedProgress },
         modifier = modifier
     )
 }

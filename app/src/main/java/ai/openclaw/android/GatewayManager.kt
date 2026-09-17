@@ -7,7 +7,7 @@ import ai.openclaw.android.accessibility.AccessibilityBridge
 import ai.openclaw.android.agent.AgentRegistry
 import ai.openclaw.android.agent.AgentSession
 import ai.openclaw.android.agent.SessionEvent
-import ai.openclaw.android.agent.SystemPromptLoader
+import ai.openclaw.android.agent.AgentPromptLoader
 import ai.openclaw.android.data.local.AppDatabase
 import ai.openclaw.android.domain.memory.FallbackMemoryExtractor
 import ai.openclaw.android.domain.memory.LlmMemoryExtractor
@@ -264,7 +264,7 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
             modelClient = mc,
             skillManager = sm
         ).apply {
-            val systemPrompt = SystemPromptLoader.load(service)
+            val systemPrompt = AgentPromptLoader.load(service)
             setSystemPrompt(systemPrompt)
             setToolsWithSkills(
                 accessTools = accessibilityBridge?.getTools() ?: emptyList(),

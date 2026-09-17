@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,7 +40,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -546,7 +548,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Default.Chat, "聊天") },
+                    icon = { Icon(Icons.AutoMirrored.Filled.Chat, "聊天") },
                     label = { Text("聊天") }
                 )
                 NavigationBarItem(
@@ -850,7 +852,7 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboardManager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
 
     Column(
         modifier = modifier
@@ -1208,7 +1210,7 @@ fun SettingsScreen(
                         TextButton(
                             onClick = {
                                 val text = LogManager.shared.getAllAsText()
-                                clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(text))
+                                clipboardManager.setPrimaryClip(ClipData.newPlainText(null, text))
                                 val count = LogManager.shared.logs.value.size
                                 Toast.makeText(
                                     context,

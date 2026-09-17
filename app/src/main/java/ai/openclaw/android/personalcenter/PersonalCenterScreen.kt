@@ -246,7 +246,7 @@ fun CompactStatsRow(
             onClick = { onStatClick(ItemSource.NOTIFICATION) }
         )
 
-        Divider(
+        HorizontalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -261,7 +261,7 @@ fun CompactStatsRow(
             onDeniedClick = onGrantCalendarPerm
         )
 
-        Divider(
+        HorizontalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -276,7 +276,7 @@ fun CompactStatsRow(
             onDeniedClick = onGrantSmsPerm
         )
 
-        Divider(
+        HorizontalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -468,7 +468,7 @@ fun PriorityZoneSectionHeader(
             color = color
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Divider(
+        HorizontalDivider(
             modifier = Modifier.weight(1f).height(1.dp),
             color = color.copy(alpha = 0.3f)
         )
@@ -694,7 +694,7 @@ fun CategorySection(
 
             // 展开指示线
             if (isExpanded) {
-                Divider(
+                HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 14.dp),
                     color = SciFiOutlineVariant.copy(alpha = 0.3f)
                 )
