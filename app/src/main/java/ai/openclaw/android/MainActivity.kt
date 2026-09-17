@@ -66,8 +66,6 @@ import ai.openclaw.android.viewmodel.ChatViewModelFactory
 import ai.openclaw.android.viewmodel.TriggerViewModel
 import ai.openclaw.android.ui.trigger.TriggerScreen
 import ai.openclaw.android.data.local.AppDatabase
-import ai.openclaw.android.trigger.scheduler.CronScheduler
-import ai.openclaw.android.trigger.EventBus
 import ai.openclaw.android.trigger.v2.TriggerConfigManager
 import ai.openclaw.android.trigger.v2.TriggerEngine
 import androidx.lifecycle.ViewModelProvider
@@ -78,6 +76,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 
 /** Unwrap ContextWrapper to find the Activity */
@@ -97,8 +96,12 @@ class MainActivity : ComponentActivity() {
 
     // 触发器子系统引用（2026-07-05 fix：v1 dao + v2 TriggerConfigManager 统一到 Room，
     // 负责在应用启动时种入 5 个预设模板，并提供给 TriggerViewModel）。
-    private var triggerConfigManager: TriggerConfigManager? = null
+    // 改为 State：加密数据库的打开与 initDefaults() 放到 IO 线程，避免主线程 ANR。
+    private val triggerConfigManagerState = mutableStateOf<TriggerConfigManager?>(null)
     private var triggerEngine: TriggerEngine? = null
+
+    /** Room 实例（IO 线程初始化），供触发器 Tab 等 UI 复用，避免主线程打开加密库 */
+    private val databaseState = mutableStateOf<AppDatabase?>(null)
 
     private var gatewayContract: GatewayContract? = null
     private var serviceBound = false
@@ -220,26 +223,25 @@ class MainActivity : ComponentActivity() {
         // - 创建 v2 TriggerConfigManager（Room-backed，取代 EncryptedSharedPreferences）。
         // - 调用 initDefaults()：在 dao 为空时种入 5 个预设模板 + 从旧版 prefs 迁移遗留数据。
         // - 不调用 triggerEngine.start()，避免与 v1 EventBus 的 BroadcastReceiver / CronScheduler 冲突。
-        try {
-            val database = AppDatabase.getInstance(applicationContext)
-            val manager = TriggerConfigManager(
-                dao = database.triggerRuleDao(),
-                context = applicationContext
-            )
-            triggerConfigManager = manager
-            // 这里是 Application onCreate 的同步点，initDefaults() 会读取 dao 并启动迁移；
-            // 使用 runBlocking 是可接受的，因为 initDefaults 是 IO 密集型但不阻塞主线程太久。
-            // 为避免在主线程上发生 ANR，仍放在 activityScope 异步执行。
-            activityScope.launch {
-                try {
-                    manager.initDefaults()
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "TriggerConfigManager.initDefaults failed: ${e.message}", e)
+        //
+        // ⚠️ AppDatabase.getInstance() 内部会初始化 Keystore MasterKey + EncryptedSharedPreferences
+        // 并可能生成 AES-256 密钥，必须在 IO 线程执行，否则主线程 ANR / 冷启动劣化。
+        activityScope.launch(Dispatchers.IO) {
+            try {
+                val database = AppDatabase.getInstance(applicationContext)
+                val manager = TriggerConfigManager(
+                    dao = database.triggerRuleDao(),
+                    context = applicationContext
+                )
+                manager.initDefaults()
+                withContext(Dispatchers.Main) {
+                    databaseState.value = database
+                    triggerConfigManagerState.value = manager
                 }
+                Log.i("MainActivity", "Trigger subsystem initialized (manager ready)")
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to initialize trigger subsystem: ${e.message}", e)
             }
-            Log.i("MainActivity", "Trigger subsystem initialized (manager ready)")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to initialize trigger subsystem: ${e.message}", e)
         }
 
         setContent {
@@ -248,7 +250,8 @@ class MainActivity : ComponentActivity() {
                     chatViewModel = chatViewModel,
                     gatewayContractProvider = { gatewayContract },
                     initialTab = intent?.getIntExtra("tab_index", 0) ?: 0,
-                    triggerConfigManager = triggerConfigManager
+                    database = databaseState.value,
+                    triggerConfigManager = triggerConfigManagerState.value
                 )
             }
         }
@@ -326,6 +329,8 @@ fun MainScreen(
     chatViewModel: ChatViewModel,
     gatewayContractProvider: () -> GatewayContract?,
     initialTab: Int = 0,
+    /** 由 Activity 在 IO 线程初始化后传入，UI 不得自行调用 AppDatabase.getInstance() */
+    database: AppDatabase? = null,
     triggerConfigManager: TriggerConfigManager? = null
 ) {
     val context = LocalContext.current
@@ -476,12 +481,17 @@ fun MainScreen(
         ConfigManager.init(context)
 
         if (!ConfigManager.hasModelCredentials()) {
-            // Debug: set default credentials for automated testing
-            // ⚠️ Do NOT hardcode API keys in production
-            ConfigManager.setModelProvider("OPENAI")
-            ConfigManager.setModelBaseUrl("https://coding.dashscope.aliyuncs.com/v1")
-            ConfigManager.setModelApiKey("sk-sp-20300993405641aab0fb73aedac15d33")
-            Log.d("MainScreen", "Default API key set for debugging")
+            // 默认凭据只能来自构建配置（local.properties / 环境变量），源码中禁止硬编码密钥。
+            // 未配置时保持为空，由设置页引导用户填写，避免任何密钥进入版本库或 Release 包。
+            val injectedKey = BuildConfig.DEFAULT_MODEL_API_KEY
+            if (injectedKey.isNotBlank()) {
+                ConfigManager.setModelProvider(BuildConfig.DEFAULT_MODEL_PROVIDER)
+                ConfigManager.setModelBaseUrl(BuildConfig.DEFAULT_MODEL_BASE_URL)
+                ConfigManager.setModelApiKey(injectedKey)
+                Log.d("MainScreen", "Default model credentials injected from build config")
+            } else {
+                Log.w("MainScreen", "No model credentials configured; user must fill them in Settings")
+            }
         }
 
         modelApiKey = ConfigManager.getModelApiKey()
@@ -799,16 +809,29 @@ fun MainScreen(
                 modifier = Modifier.padding(padding)
             )
             3 -> {
-                TriggerScreen(
-                    viewModel = remember { TriggerViewModel(
-                        database = AppDatabase.getInstance(context),
-                        agentSessionFactory = { null },
-                        cronScheduler = CronScheduler(context, EventBus.instance!!),
-                        triggerConfigManager = triggerConfigManager
-                    ) },
-                    onNavigateBack = { selectedTab = 0 },
-                    modifier = Modifier.padding(padding)
-                )
+                val db = database
+                if (db == null) {
+                    // 加密数据库仍在 IO 线程初始化，这里不能调用 AppDatabase.getInstance()（主线程）
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(padding),
+                        contentAlignment = Alignment.Center
+                    ) { CircularProgressIndicator() }
+                } else {
+                    TriggerScreen(
+                        viewModel = remember(db, triggerConfigManager) {
+                            TriggerViewModel(
+                                database = db,
+                                agentSessionFactory = { null },
+                                // 不再在 UI 层创建第二个 CronScheduler：v1 调度由 GatewayManager 唯一持有，
+                                // 且 GatewayService 未启动时 EventBus.instance 为 null（此前会 NPE 崩溃）。
+                                cronScheduler = null,
+                                triggerConfigManager = triggerConfigManager
+                            )
+                        },
+                        onNavigateBack = { selectedTab = 0 },
+                        modifier = Modifier.padding(padding)
+                    )
+                }
             }
         }
     }

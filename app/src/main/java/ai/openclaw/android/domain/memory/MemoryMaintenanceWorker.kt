@@ -62,7 +62,10 @@ class MemoryMaintenanceWorker(
             LogManager.shared.log("INFO", TAG, "Memory maintenance complete: $count memories retained")
             Result.success()
         } catch (e: Exception) {
+            // 此前只记录 message：Koin 未启动导致的 IllegalStateException 被静默吞掉，
+            // 表现为"后台任务永远重试但没人知道"。这里补上完整堆栈。
             LogManager.shared.log("ERROR", TAG, "Memory maintenance failed: ${e.message}")
+            android.util.Log.e(TAG, "Memory maintenance failed", e)
             Result.retry()
         }
     }

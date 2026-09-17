@@ -37,7 +37,9 @@ import kotlinx.coroutines.launch
 class TriggerViewModel(
     database: AppDatabase,
     agentSessionFactory: suspend () -> AgentSession?,
-    cronScheduler: CronScheduler,
+    // cronScheduler 当前未被使用（见下方 _unusedCronScheduler）。改为可空并在 UI 层传 null，
+    // 避免在 Activity 中创建第二套 CronScheduler / 对未初始化的 EventBus 强解包。
+    cronScheduler: CronScheduler? = null,
     triggerConfigManager: TriggerConfigManager? = null,
     triggerEngine: TriggerEngine? = null
 ) : ViewModel() {

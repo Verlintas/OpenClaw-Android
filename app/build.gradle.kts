@@ -65,6 +65,20 @@ android {
             "BUGLY_APP_ID_RELEASE",
             "\"${buglyAppIdRelease ?: "placeholder-release"}\""
         )
+
+        // ==================== 可选的构建期默认模型凭据 ====================
+        // 源码中禁止硬编码任何 API Key。仅在 local.properties / 环境变量中配置，
+        // 用于本地调试时自动填充；未配置时为空，App 会引导用户在设置页填写。
+        val defaultModelApiKey = localProperties.getProperty("DEFAULT_MODEL_API_KEY")
+            ?: System.getenv("DEFAULT_MODEL_API_KEY") ?: ""
+        val defaultModelBaseUrl = localProperties.getProperty("DEFAULT_MODEL_BASE_URL")
+            ?: System.getenv("DEFAULT_MODEL_BASE_URL") ?: ""
+        val defaultModelProvider = localProperties.getProperty("DEFAULT_MODEL_PROVIDER")
+            ?: System.getenv("DEFAULT_MODEL_PROVIDER") ?: "OPENAI"
+
+        buildConfigField("String", "DEFAULT_MODEL_API_KEY", "\"$defaultModelApiKey\"")
+        buildConfigField("String", "DEFAULT_MODEL_BASE_URL", "\"$defaultModelBaseUrl\"")
+        buildConfigField("String", "DEFAULT_MODEL_PROVIDER", "\"$defaultModelProvider\"")
     }
 
     signingConfigs {
@@ -157,6 +171,11 @@ android {
             )
         }
     }
+}
+
+// Room schema 导出：开启后可校验/生成迁移，避免迁移靠人工维护
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

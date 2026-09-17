@@ -11,6 +11,10 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.tencent.bugly.BuglyStrategy
 import com.tencent.bugly.crashreport.CrashReport
+import ai.openclaw.android.di.appModule
+import org.koin.android.ext.koin.androidContext
+import org.koin.android.ext.koin.androidLogger
+import org.koin.core.context.startKoin
 
 class OpenClawApplication : Application() {
     lateinit var permissionManager: PermissionManager
@@ -19,8 +23,26 @@ class OpenClawApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         permissionManager = PermissionManager(this)
+        initKoin()
         initBugly()
         registerPrefetchWorker()
+    }
+
+    /**
+     * 启动 Koin 容器。
+     *
+     * ⚠️ 此前全项目从未调用 startKoin，`di/AppModule.kt` 里的定义全部是死代码：
+     * - 所有对象都在 MainActivity / GatewayManager 里手动 new，出现多份实例；
+     * - MemoryMaintenanceWorker / UserProfileBuilderWorker 用 KoinPlatform.getKoin().get<>()，
+     *   Koin 未启动时必抛异常，又被 catch → Result.retry() 吞掉，导致后台任务永久静默重试。
+     * 这里统一在 Application 启动，所有 single 均为懒加载，不增加启动耗时。
+     */
+    private fun initKoin() {
+        startKoin {
+            androidLogger()
+            androidContext(this@OpenClawApplication)
+            modules(appModule)
+        }
     }
 
     /**

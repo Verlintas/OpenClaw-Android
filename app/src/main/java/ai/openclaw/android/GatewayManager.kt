@@ -288,7 +288,8 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         }
 
         // 5. Rewire memory subsystem
-        wireMemoryToSession()
+        // 模型已切换（抽取器可能从 LLM 版变为规则版），必须重建 MemoryManager / HybridSessionManager
+        wireMemoryToSession(recreate = true)
 
         Log.d(TAG, "Model reconfigured successfully")
         return agentSession != null
@@ -626,14 +627,14 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         embeddingService = TfLiteEmbeddingService(service)
         embeddingService!!.initialize()
 
-        wireMemoryToSession()
-
-        // Wire memory to multi-agent default session and update backward compat reference
+        // 先确定真正对外服务的 AgentSession，再做一次记忆装配。
+        // ⚠️ 此前是「wireMemoryToSession() → 替换 agentSession → 再 wireMemoryToSession()」，
+        // 单次启动会创建 2 套 MemoryManager + 2 套 HybridSessionManager，第一套立刻被丢弃。
         agentSessionManager?.let { manager ->
             val defaultAgentId = agentConfigManager!!.getDefaultAgent().id
-            val defaultSession = manager.getOrCreate(defaultAgentId)
-            agentSession = defaultSession
+            agentSession = manager.getOrCreate(defaultAgentId)
         }
+
         wireMemoryToSession()
 
         // Initialize FeishuClient (only if credentials are configured)
@@ -684,38 +685,61 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         Log.d(TAG, "Components initialized")
     }
 
-    private suspend fun wireMemoryToSession() {
+    /**
+     * 装配记忆子系统并挂到当前 AgentSession。
+     *
+     * @param recreate true 时重建 MemoryManager / HybridSessionManager（模型切换后
+     *                 抽取器需要从 LLM 版换回规则版时必须重建）；false 时复用已有实例，
+     *                 只重新挂载——避免重复构造和重复 `sm.initialize()` 的 IO。
+     */
+    private suspend fun wireMemoryToSession(recreate: Boolean = false) {
         val db = database ?: return
         val emb = embeddingService ?: return
 
-        val extractor = if (localLLMClient?.isModelLoaded() == true)
-            LlmMemoryExtractor(localLLMClient!!)
-        else
-            FallbackMemoryExtractor()
+        val mm = if (recreate || memoryManager == null) {
+            val extractor = if (localLLMClient?.isModelLoaded() == true)
+                LlmMemoryExtractor(localLLMClient!!)
+            else
+                FallbackMemoryExtractor()
 
-        val mm = MemoryManager(
-            memoryDao = db.memoryDao(),
-            vectorDao = db.memoryVectorDao(),
-            embeddingService = emb,
-            extractor = extractor
-        )
-        memoryManager = mm
+            MemoryManager(
+                memoryDao = db.memoryDao(),
+                vectorDao = db.memoryVectorDao(),
+                embeddingService = emb,
+                extractor = extractor
+            ).also { memoryManager = it }
+        } else {
+            memoryManager!!
+        }
 
-        val compressor = SessionCompressor(
-            llmClient = localLLMClient,
-            summaryDao = db.summaryDao()
-        )
-        val sm = HybridSessionManager(
-            sessionDao = db.sessionDao(),
-            messageDao = db.messageDao(),
-            summaryDao = db.summaryDao(),
-            sessionCompressor = compressor,
-            tokenCounter = TokenCounter(),
-            memoryManager = mm
-        )
-        sessionManager = sm
-        sm.initialize()
+        val sm = if (recreate || sessionManager == null) {
+            val compressor = SessionCompressor(
+                llmClient = localLLMClient,
+                summaryDao = db.summaryDao()
+            )
+            HybridSessionManager(
+                sessionDao = db.sessionDao(),
+                messageDao = db.messageDao(),
+                summaryDao = db.summaryDao(),
+                sessionCompressor = compressor,
+                tokenCounter = TokenCounter(),
+                memoryManager = mm
+            ).also {
+                sessionManager = it
+                it.initialize()
+            }
+        } else {
+            sessionManager!!
+        }
 
+        attachMemoryToSessions(sm, mm)
+    }
+
+    /** 把 [sm] / [mm] 挂到 backward-compat session 与多 Agent 默认 session 上 */
+    private fun attachMemoryToSessions(
+        sm: HybridSessionManager,
+        mm: MemoryManager
+    ) {
         // Wire memory to backward-compatible agentSession
         agentSession?.setSessionManager(sm)
         agentSession?.setMemoryContextProvider {

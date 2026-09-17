@@ -92,6 +92,7 @@ class UserProfileBuilderWorker(
             Result.success()
         } catch (e: Exception) {
             LogManager.shared.log("ERROR", TAG, "Profile build failed: ${e.message}")
+            android.util.Log.e(TAG, "Profile build failed", e)
             Result.retry()
         }
     }

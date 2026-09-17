@@ -60,7 +60,7 @@ class ChatIntegrationTest {
     // ==================== 正常文本回复流程 ====================
 
     @Test
-    fun `plain text reply flow — user message and AI response added to messages`() = runTest {
+    fun `plain_text_reply_flow_user_message_and_AI_response_added_to_messages`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
 
@@ -77,7 +77,7 @@ class ChatIntegrationTest {
     }
 
     @Test
-    fun `isLoading becomes true then false during text reply`() = runTest {
+    fun `isLoading_becomes_true_then_false_during_text_reply`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 50
 
@@ -96,7 +96,7 @@ class ChatIntegrationTest {
     // ==================== A2UI 卡片渲染流程 ====================
 
     @Test
-    fun `weather card flow — A2UI markup in response`() = runTest {
+    fun `weather_card_flow_A2UI_markup_in_response`() = runTest {
         mockGateway.setScenario(MockScenario.WeatherCard)
         mockGateway.responseDelayMs = 0
 
@@ -113,7 +113,7 @@ class ChatIntegrationTest {
     }
 
     @Test
-    fun `search card flow — A2UI search results`() = runTest {
+    fun `search_card_flow_A2UI_search_results`() = runTest {
         mockGateway.setScenario(MockScenario.SearchCard)
         mockGateway.responseDelayMs = 0
 
@@ -127,7 +127,7 @@ class ChatIntegrationTest {
     }
 
     @Test
-    fun `error card flow — A2UI error card`() = runTest {
+    fun `error_card_flow_A2UI_error_card`() = runTest {
         mockGateway.setScenario(MockScenario.ErrorCard)
         mockGateway.responseDelayMs = 0
 
@@ -143,7 +143,7 @@ class ChatIntegrationTest {
     // ==================== 工具调用流程 ====================
 
     @Test
-    fun `tool calling flow — includes tool execution markers`() = runTest {
+    fun `tool_calling_flow_includes_tool_execution_markers`() = runTest {
         mockGateway.setScenario(MockScenario.MixedContent)
         mockGateway.responseDelayMs = 0
 
@@ -162,7 +162,7 @@ class ChatIntegrationTest {
     // ==================== 错误处理流程 ====================
 
     @Test
-    fun `error flow — gateway error handled gracefully`() = runTest {
+    fun `error_flow_gateway_error_handled_gracefully`() = runTest {
         mockGateway.setScenario(MockScenario.Error)
         mockGateway.responseDelayMs = 0
 
@@ -179,7 +179,7 @@ class ChatIntegrationTest {
     }
 
     @Test
-    fun `timeout flow — tokens then error`() = runTest {
+    fun `timeout_flow_tokens_then_error`() = runTest {
         mockGateway.setScenario(MockScenario.Timeout)
         mockGateway.responseDelayMs = 0
 
@@ -198,7 +198,7 @@ class ChatIntegrationTest {
     // ==================== JSONL A2UI 流程 ====================
 
     @Test
-    fun `JSONL A2UI flow — JSONL format response`() = runTest {
+    fun `JSONL_A2UI_flow_JSONL_format_response`() = runTest {
         mockGateway.setScenario(MockScenario.JsonlA2UI)
         mockGateway.responseDelayMs = 0
 
@@ -215,7 +215,7 @@ class ChatIntegrationTest {
     // ==================== 测试模式切换流程 ====================
 
     @Test
-    fun `switch from plain text to error scenario at runtime`() = runTest {
+    fun `switch_from_plain_text_to_error_scenario_at_runtime`() = runTest {
         // Start with plain text
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
@@ -241,7 +241,7 @@ class ChatIntegrationTest {
     // ==================== Multiple messages flow ====================
 
     @Test
-    fun `multiple sequential messages accumulate correctly`() = runTest {
+    fun `multiple_sequential_messages_accumulate_correctly`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
 
@@ -263,7 +263,7 @@ class ChatIntegrationTest {
     // ==================== Clear history ====================
 
     @Test
-    fun `clearHistory resets messages to empty`() = runTest {
+    fun `clearHistory_resets_messages_to_empty`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
 
@@ -282,7 +282,7 @@ class ChatIntegrationTest {
     // ==================== Empty message handling ====================
 
     @Test
-    fun `sending empty text still adds user message`() = runTest {
+    fun `sending_empty_text_still_adds_user_message`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
 
@@ -298,7 +298,7 @@ class ChatIntegrationTest {
     // ==================== isReady check ====================
 
     @Test
-    fun `MockGateway isReady returns true allows message sending`() = runTest {
+    fun `MockGateway_isReady_returns_true_allows_message_sending`() = runTest {
         mockGateway.setScenario(MockScenario.PlainText)
         mockGateway.responseDelayMs = 0
 
