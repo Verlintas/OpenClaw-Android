@@ -77,8 +77,8 @@
 - [ ] **统一 history/state 双轨制**(07-03 遗留)
 - [ ] 其余子系统废弃 API 清理(需单独评估,含敏感 API):DeviceSkill wake lock / NetworkInfo 系、NotifySkill PRIORITY 系、OkHttpFeishuClient `RequestBody.create`、CameraSkill `createCaptureSession`、Theme `statusBarColor`、A2UICards `outlinedButtonBorder`
 - [ ] lint 崩溃根因修复:升级 AGP(>8.7.3)或审视 compose runtime 1.9.0 引入来源,然后移除三条 disable
-- [ ] personalcenter/ 模块(PersonalCenterScreen、ItemSource)无架构文档,CLAUDE.md 未提及
-- [ ] CLAUDE.md 架构段落同步 AppDatabase v8(CachedDataEntity/DAO、T005 预取层)
+- [x] personalcenter/ 模块(PersonalCenterScreen、ItemSource)无架构文档,CLAUDE.md 未提及 — 已补 Personal Center 段落(聚合管线/4 sources/CenterItem/过滤评分组件)
+- [x] CLAUDE.md 架构段落同步 AppDatabase v8(CachedDataEntity/DAO、T005 预取层) — Data 段已更新(schema v8/exportSchema/幂等迁移链警告)+ 新增 Pre-fetch Layer 段落
 
 ---
 

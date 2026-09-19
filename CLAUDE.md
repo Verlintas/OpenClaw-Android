@@ -148,11 +148,14 @@ Users can send images with messages (from gallery or camera, max 3 per message).
 Room database (singleton via `AppDatabase.getInstance(context)`, managed by Koin) with domains:
 - **Sessions** — `SessionDao`, `MessageDao`, `SummaryDao` for conversation persistence
 - **Memory** — `MemoryDao`, `MemoryVectorDao` for storing memories and their vector embeddings
-- **Memory FTS** — `MemoryFtsDao`, `BM25Index` for full-text keyword search
+- **Memory FTS** — `MemoryFtsDao`, `BM25Index` for full-text keyword search (BM25 tokenizer handles CJK bigrams; `isLetterOrDigit()` alone would swallow adjacent CJK chars — fixed in `c0d7ce0`)
 - **Dynamic Skills** — `DynamicSkillDao` for LLM-generated skill persistence
-- **Triggers** — `TriggerRuleDao`, `TriggerLogDao` for event rules and logs
+- **Triggers** — `TriggerRuleDao`, `TriggerLogDao` (v1 rules + v2 engine logs), `TriggerEventEntity` (v2 event history) — unified into Room by `71d7711`
+- **Pre-fetch Cache** — `CachedDataDao` + `CachedDataEntity` (`cached_data` table): cache-first storage for high-frequency queries (weather etc.), 30min TTL, added in v7→v8 migration (`66014c6`, T005)
 
-Entities are in `data/model/`, the Room database is `AppDatabase`. `Converters` handle complex type serialization.
+Entities are in `data/model/`, the Room database is `AppDatabase` (**schema version 8**, `exportSchema=true` → `app/schemas/`). `Converters` handle complex type serialization.
+
+⚠️ **Migration chain is idempotent v1→v8** (see `AppDatabase.kt`): early schema versions were never exported and `fallbackToDestructiveMigration()` used to silently wipe the encrypted DB on upgrade. All `ALTER` migrations use `columnExists()` for idempotency; open failure falls back to explicit reporting (Bugly) + rebuild instead of silent data loss. **Never re-enable `fallbackToDestructiveMigration()`.**
 
 ### Domain Layer (`domain/`)
 
@@ -160,6 +163,22 @@ Entities are in `data/model/`, the Room database is `AppDatabase`. `Converters` 
 - **`domain/agent/`** — Multi-agent routing and session management (see Multi-Agent System above)
 - **`domain/memory/`** — `MemoryManager` handles memory CRUD. `HybridSearchEngine` combines BM25 (35%) + vector (55%) + recency (10%). `ColdStartManager` limits to lightweight mode for first 72h. `MemoryMaintenanceWorker` and `UserProfileBuilderWorker` are WorkManager-based periodic tasks. `DiffSyncManager` for cross-device sync.
 - **`domain/model/`** — `SessionConfig` and shared domain models
+
+### Pre-fetch Layer (`prefetch/`, T005)
+
+Cache-first data layer: high-frequency queries (weather) are refreshed in background so most reads hit cache instead of the network.
+- **`PrefetchService`** — Singleton. Weather cache read/write (`getCachedWeather`/`cacheWeather`), background refresh via open-meteo → wttr.in fallback, expired-data cleanup. 30min weather TTL. 20-city coordinate map.
+- **`PrefetchWorker`** — CoroutineWorker, registered in `OpenClawApplication` as `PeriodicWorkRequest` (30min, name `prefetch_worker`). Reads city list from SharedPreferences `prefetch_cities` (default `["北京"]`), refreshes weather cache, cleans expired rows.
+- **`WeatherSkill`** integration: reads `PrefetchService.instance.getCachedWeather()` first; falls back to live fetch on cache miss.
+- Spec: `docs/specs/t005-prefetch-data-layer.md`
+
+### Personal Center (`personalcenter/`)
+
+Aggregated priority inbox: merges notifications/calendar/SMS/call-log into one importance-ranked list.
+- **`PersonalCenterScreen`** / **`PersonalCenterViewModel`** — UI + aggregation pipeline: collect 4 sources → keyword filter (LLM semantic filter when available) → cross-source dedup → importance ranking → timed fallback refresh.
+- **Sources** (`sources/`) — `ItemSource` enum (NOTIFICATION/CALENDAR/SMS/CALL_LOG, icon + label + package-name inference); `NotificationSource`, `CalendarSource`, `SmsSource`, `CallLogSource` expose `Flow<List<CenterItem>>` via `callbackFlow` (requires respective runtime permissions).
+- **`CenterItem`** — unified model: importance 0.0~1.0, `dedupKey`, `mergedCount`, `priorityLevel` (urgent/today/reference), `actionType` (reply/act/info), `expiryTimestamp`.
+- **Filters & scoring** — `ContentFilter` (keyword blacklist/whitelist), `SmartFilter` (LLM value judgment, callback-injected LLM, 1h per-source+title cache), `DeduplicationEngine` (cross-source merge), `ImportanceCalculator` (`baseScore × recencyWeight`), `PriorityClassifier` (LLM batch classification with rule-based fallback).
 
 ### Dependency Injection (`di/`)
 
@@ -193,9 +212,9 @@ Built-in skills: AgentManagement, AppLauncher, Calendar, Contact, File, Generate
 ### UI Layer (`ui/`)
 
 Jetpack Compose with Material3. Sci-Fi themed.
-- **`A2UICards`** / **`A2UICardModels`** — Rich card rendering (weather, location, reminder, etc.) from `[A2UI]...[/A2UI]` markup
+- **`A2UICards`** / **`A2UICardModels`** — Rich card rendering (weather, location, reminder, etc.) from `[A2UI]...[/A2UI]` markup. A2UI v2 structured card format (see `docs/specs/skill-cards-batch2.md`)
 - **`MarkdownRenderer`** — Markdown to Compose rendering
-- **`MessageBubble`** — Chat message UI component
+- **`ModelDownloadScreen`** — On-device model management UI with SHA256 verification (ModelDownloadManager)
 - **`ToolCallCard`** — Visualizes tool execution with status
 - **`TypingIndicator`** / **`ShimmerEffect`** — Loading animations
 - **`SettingsScreen`** — Settings UI
@@ -225,7 +244,7 @@ Agent responses use the `[A2UI]...[/A2UI]` markup for rich UI rendering. Support
 ### Test Coverage Areas
 
 - **Unit tests** (`src/test/`): JVM-based using JUnit 4 + MockK. Cover serialization (`ModelModelsTest`), skill logic, session compression, memory system, embedding service, agent config, and domain logic.
-- **Instrumented tests** (`src/androidTest/`): Require device/emulator. Cover AgentSession streaming, HybridSessionManager integration, DAO operations, UI components (MessageBubble, EnergyBar, SettingsScreen), and ML embedding services.
+- **Instrumented tests** (`src/androidTest/`): Require device/emulator. Cover AgentSession streaming, HybridSessionManager integration, DAO operations (incl. `AppDatabaseMigrationTest` v1→v8), UI components (EnergyBar, SettingsScreen), and ML embedding services.
 - **A2UI compose module** (`android_compose/src/test/`): DataModelProcessor, NetworkTransport, A2UIService lifecycle, theme/color parsing, memory leak detection.
 
 ### Known Test Patterns & Pitfalls
