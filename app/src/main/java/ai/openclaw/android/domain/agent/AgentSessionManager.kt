@@ -159,7 +159,10 @@ open class AgentSessionManager(
 
         // Parse model string: "openai/MiniMax-M3" → provider=openai, name=MiniMax-M3
         val parts = effectiveModel.split("/", limit = 2)
-        val providerStr = if (parts.size > 1) parts[0] else "openai"
+        // 无 "provider/" 前缀时用用户在设置里选的全局 provider（默认 OPENAI），
+        // 而不是硬编码 openai——否则用户配置 ANTHROPIC + Anthropic 兼容端点时，
+        // 这里会构造 OpenAIClient，把请求打到 {baseUrl}/chat/completions 上静默 404。
+        val providerStr = if (parts.size > 1) parts[0] else ConfigManager.getModelProvider().lowercase()
         val modelName = if (parts.size > 1) parts[1] else effectiveModel
 
         val apiKey = ConfigManager.getModelApiKey()
