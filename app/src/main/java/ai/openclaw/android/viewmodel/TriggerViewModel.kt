@@ -4,14 +4,9 @@ import ai.openclaw.android.data.local.AppDatabase
 import ai.openclaw.android.trigger.models.TriggerRule
 import ai.openclaw.android.trigger.dao.TriggerRuleDao
 import ai.openclaw.android.trigger.dao.TriggerLogDao
-import ai.openclaw.android.trigger.v2.TriggerEngine
-import ai.openclaw.android.trigger.v2.AITriggerDecision
-import ai.openclaw.android.trigger.v2.TriggerEngineEvent
+import ai.openclaw.android.trigger.EventBus
 import ai.openclaw.android.trigger.v2.TriggerConfigManager
 import ai.openclaw.android.trigger.v2.TriggerConfig
-import ai.openclaw.android.trigger.v2.TriggerLogManager
-import ai.openclaw.android.trigger.v2.TriggerDecision
-import ai.openclaw.android.trigger.v2.UserFeedback
 import ai.openclaw.android.trigger.v2.TriggerTemplates
 import ai.openclaw.android.trigger.v2.toV1Rule
 import ai.openclaw.android.agent.AgentSession
@@ -27,12 +22,13 @@ import kotlinx.coroutines.launch
  * 管理 Trigger 列表、CRUD 操作、日志查询、AI 决策统计
  *
  * 设计变更 (2026-07-05)：
- * - 新增可选参数 `triggerConfigManager` 和 `triggerEngine`，仅在调用方传参时启用。
- *   保留 3-参构造以保持向后兼容（TriggerScreen 现有调用点无需修改）。
- * - 当传入 configManager 时，loadRules() 会同时读取 v1 dao 与 v2 configManager 并
+ * - 新增可选参数 `triggerConfigManager`，仅在调用方传参时启用。
+ * - 当传入 configManager 时，loadRules() 会同时读取 v1 dao 与 configManager 并
  *   按 id 去重合并（v1 dao 是唯一写入路径）。
- * - 当传入 engine 时，addRule/updateRule/deleteRule 优先走 engine.addRule 等方法；
- *   否则直接走 dao。
+ *
+ * 设计变更 (S2)：trigger v2 引擎（TriggerEngine / AITriggerDecision / TriggerLogManager）
+ * 从未被实例化，且 filterMatches 相比 v1 已退化（丢失 MatchMode 四分支），
+ * 因此**保留 v1、删除 v2 引擎**。写入路径统一为 configManager → v1 dao。
  */
 class TriggerViewModel(
     database: AppDatabase,
@@ -40,8 +36,7 @@ class TriggerViewModel(
     // cronScheduler 当前未被使用（见下方 _unusedCronScheduler）。改为可空并在 UI 层传 null，
     // 避免在 Activity 中创建第二套 CronScheduler / 对未初始化的 EventBus 强解包。
     cronScheduler: CronScheduler? = null,
-    triggerConfigManager: TriggerConfigManager? = null,
-    triggerEngine: TriggerEngine? = null
+    triggerConfigManager: TriggerConfigManager? = null
 ) : ViewModel() {
 
     companion object {
@@ -78,12 +73,8 @@ class TriggerViewModel(
     private val _recentLogs = MutableStateFlow<List<ai.openclaw.android.trigger.models.TriggerLog>>(emptyList())
     val recentLogs: StateFlow<List<ai.openclaw.android.trigger.models.TriggerLog>> = _recentLogs.asStateFlow()
 
-    /** AI 决策统计 */
-    private val _decisionStats = MutableStateFlow(ai.openclaw.android.trigger.v2.DecisionStats())
-    val decisionStats: StateFlow<ai.openclaw.android.trigger.v2.DecisionStats> = _decisionStats.asStateFlow()
-
-    /** 引擎运行状态 */
-    private val _engineRunning = MutableStateFlow(false)
+    /** 引擎运行状态 — v1 EventBus 是否已由 GatewayManager 初始化 */
+    private val _engineRunning = MutableStateFlow(EventBus.instance != null)
     val engineRunning: StateFlow<Boolean> = _engineRunning.asStateFlow()
 
     /** UI: 是否显示新增对话框 */
@@ -98,59 +89,18 @@ class TriggerViewModel(
     private val _toastMessage = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val toastMessage: SharedFlow<String> = _toastMessage.asSharedFlow()
 
-    // ==================== 引用（延迟初始化） ====================
-
-    private var triggerEngine: TriggerEngine? = triggerEngine
-    private var aiDecision: AITriggerDecision? = null
-    private var logManager: TriggerLogManager? = null
-
-    // ==================== 初始化 ====================
-
-    fun initEngine(
-        engine: TriggerEngine,
-        decision: AITriggerDecision,
-        logMgr: TriggerLogManager
-    ) {
-        triggerEngine = engine
-        aiDecision = decision
-        logManager = logMgr
-
-        // 观察引擎事件
-        viewModelScope.launch {
-            engine.triggerEvents.collect { event ->
-                when (event) {
-                    is TriggerEngineEvent.EngineStarted -> _engineRunning.value = true
-                    is TriggerEngineEvent.EngineStopped -> _engineRunning.value = false
-                    is TriggerEngineEvent.RulesLoaded -> loadRules()
-                    is TriggerEngineEvent.RuleAdded,
-                    is TriggerEngineEvent.RuleUpdated,
-                    is TriggerEngineEvent.RuleDeleted,
-                    is TriggerEngineEvent.RuleToggled -> loadRules()
-                    else -> {}
-                }
-            }
-        }
-
-        // 观察 AI 决策统计
-        viewModelScope.launch {
-            decision.decisionStats.collect { stats ->
-                _decisionStats.value = stats
-            }
-        }
-
-        loadRules()
-        loadRecentLogs()
-    }
-
     // ==================== 规则操作 ====================
 
     fun loadRules() {
         viewModelScope.launch {
+            // v1 EventBus 由 GatewayManager 在服务启动时初始化，这里反映其真实状态
+            _engineRunning.value = EventBus.instance != null
+
             // 读取 v1 dao（唯一写入路径）
             val daoRules = ruleDao.getAll()
 
-            // 如果传入了 configManager，同时读取 v2 configManager。
-            // 设计上 v2 configManager 在 fix 之后也是读取同一个 dao，所以这两路返回相同的
+            // 如果传入了 configManager，同时读取 configManager。
+            // 两者在 fix 之后都是读取同一个 dao，所以这两路返回相同的
             // TriggerConfig 集合；dedup 仍然保留是为了在混合配置期间保持幂等。
             val configs = if (configManager != null) {
                 val daoConfigs = daoRules.map { TriggerConfig.fromRule(it) }
@@ -175,76 +125,53 @@ class TriggerViewModel(
 
     fun addRule(rule: TriggerRule) {
         viewModelScope.launch {
-            // 优先走 engine（如可用）；否则直接走 configManager → dao。
-            // 两者在 fix 之后都写入同一个 dao，不会产生重复（OnConflictStrategy.REPLACE）。
-            if (triggerEngine != null) {
-                triggerEngine?.addRule(rule)
-            } else if (configManager != null) {
+            // v2 引擎已删除；写入路径统一为 configManager → v1 dao
+            if (configManager != null) {
                 configManager.save(TriggerConfig.fromRule(rule))
-                loadRules()
             } else {
                 ruleDao.insert(rule)
-                loadRules()
             }
+            loadRules()
             _toastMessage.emit("已添加触发器: ${rule.name}")
         }
     }
 
     fun updateRule(rule: TriggerRule) {
         viewModelScope.launch {
-            if (triggerEngine != null) {
-                triggerEngine?.updateRule(rule)
-            } else if (configManager != null) {
+            if (configManager != null) {
                 configManager.save(TriggerConfig.fromRule(rule))
-                loadRules()
             } else {
                 ruleDao.insert(rule)
-                loadRules()
             }
+            loadRules()
             _toastMessage.emit("已更新触发器: ${rule.name}")
         }
     }
 
     fun deleteRule(ruleId: String) {
         viewModelScope.launch {
-            if (triggerEngine != null) {
-                triggerEngine?.deleteRule(ruleId)
-            } else if (configManager != null) {
+            if (configManager != null) {
                 configManager.delete(ruleId)
-                loadRules()
             } else {
                 ruleDao.deleteById(ruleId)
-                loadRules()
             }
+            loadRules()
             _toastMessage.emit("已删除触发器")
         }
     }
 
     fun toggleRule(ruleId: String, enabled: Boolean) {
         viewModelScope.launch {
-            if (triggerEngine != null) {
-                triggerEngine?.toggleRule(ruleId, enabled)
-            } else {
-                ruleDao.setEnabled(ruleId, enabled)
-                loadRules()
-            }
+            ruleDao.setEnabled(ruleId, enabled)
+            loadRules()
         }
     }
 
     fun addPresetTemplate(template: TriggerConfig) {
         viewModelScope.launch {
-            // v2 TriggerConfig 统一走 toV1Rule() 转换后走 addRule 路径，
+            // TriggerConfig 统一走 toV1Rule() 转换后走 addRule 路径，
             // v1 dao 的 OnConflictStrategy.REPLACE 保证幂等。
             addRule(template.toV1Rule())
-        }
-    }
-
-    // ==================== 用户反馈 ====================
-
-    fun onUserFeedback(eventId: String, feedback: UserFeedback) {
-        viewModelScope.launch {
-            logManager?.updateUserFeedback(eventId, feedback)
-            _toastMessage.emit("反馈已记录: ${feedback.name}")
         }
     }
 

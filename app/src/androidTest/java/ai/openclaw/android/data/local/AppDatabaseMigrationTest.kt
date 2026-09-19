@@ -12,14 +12,16 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * 真机端到端验证数据库迁移链（v1 → v8）。
+ * 真机端到端验证数据库迁移链（v1 → v9）。
  *
  * 背景：v1 时代 exportSchema=false，且历史上一直开着 fallbackToDestructiveMigration()，
- * 老库升级没有迁移路径，Room 会静默清空加密库。S1 补了 MIGRATION_1_2 并去掉了破坏性迁移，
+ * 老库升级没有迁移路径，Room 会静默清空加密库。S1 补了 MIGRATION_1_2 并去掉了破坏性迁移；
+ * S2 删除了 trigger v2 引擎及 trigger_events_v2 表（v8 → v9）。
  * 这里验证：
  *  1. 迁移链能跑通且 Room 校验通过（若 schema 与实体不一致，getInstance 会抛异常）；
  *  2. v1 的老数据必须存活（若走了破坏性重建，数据必然丢失 → 断言失败）；
- *  3. 迁移后的列不能残留 DEFAULT（Room 由实体生成的建表语句不含 DEFAULT）。
+ *  3. 迁移后的列不能残留 DEFAULT（Room 由实体生成的建表语句不含 DEFAULT）；
+ *  4. S2 废弃的 trigger_events_v2 表已被删除。
  */
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseMigrationTest {
@@ -27,7 +29,7 @@ class AppDatabaseMigrationTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
-    fun v1_to_v8_migratesWithoutDataLossAndMatchesRoomSchema() {
+    fun v1_to_v9_migratesWithoutDataLossAndMatchesRoomSchema() {
         // ---- 清理：确保从 v1 冷启动 ----
         val dbFile = context.getDatabasePath(AppDatabase.DATABASE_NAME)
         dbFile.parentFile?.listFiles()
@@ -75,7 +77,7 @@ class AppDatabaseMigrationTest {
         val room = AppDatabase.getInstance(context)
         val handle: SupportSQLiteDatabase = room.openHelper.readableDatabase
 
-        assertEquals("迁移后 user_version 应为 8", 8, handle.version)
+        assertEquals("迁移后 user_version 应为 9", 9, handle.version)
 
         // ---- 3. 老数据必须存活（若走了破坏性重建，这里必然失败）----
         assertEquals("v1 的 session 数据必须保留", 1, count(handle, "sessions"))
@@ -94,10 +96,17 @@ class AppDatabaseMigrationTest {
         // ---- 4. 所有表都已建立且可查询 ----
         listOf(
             "sessions", "messages", "summaries", "memories", "memory_vectors",
-            "dynamic_skills", "trigger_rules", "trigger_logs", "trigger_events_v2", "cached_data"
+            "dynamic_skills", "trigger_rules", "trigger_logs", "cached_data"
         ).forEach { table ->
             assertTrue("表 $table 应存在且可查询", count(handle, table) >= 0)
         }
+
+        // S2：trigger_events_v2 已随 v2 引擎删除，迁移后不应再存在
+        assertEquals(
+            "trigger_events_v2 应已被 MIGRATION_8_9 删除",
+            -1,
+            countIgnoringError(handle, "trigger_events_v2")
+        )
 
         // ---- 5. 迁移后的列不能残留 DEFAULT（Room 实体没有声明 defaultValue）----
         assertNull("memories.version 不应残留 DEFAULT", defaultOf(handle, "memories", "version"))
@@ -125,6 +134,13 @@ class AppDatabaseMigrationTest {
         } finally {
             c.close()
         }
+    }
+
+    /** 表不存在时返回 -1（而不是抛异常），用于断言某张表已被删除 */
+    private fun countIgnoringError(db: SupportSQLiteDatabase, table: String): Int = try {
+        count(db, table)
+    } catch (e: Exception) {
+        -1
     }
 
     private fun firstString(db: SupportSQLiteDatabase, sql: String): String? {

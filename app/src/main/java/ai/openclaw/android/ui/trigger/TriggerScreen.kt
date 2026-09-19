@@ -60,7 +60,6 @@ fun TriggerScreen(
     val engineRunning by viewModel.engineRunning.collectAsStateWithLifecycle()
     val showAddDialog by viewModel.showAddDialog.collectAsStateWithLifecycle()
     val selectedTriggerId by viewModel.selectedTriggerId.collectAsStateWithLifecycle()
-    val decisionStats by viewModel.decisionStats.collectAsStateWithLifecycle()
 
     // Toast 消息
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -99,8 +98,7 @@ fun TriggerScreen(
                 TriggerStatsCard(
                     totalRules = rules.size,
                     enabledRules = rules.count { it.enabled },
-                    totalLogs = recentLogs.size,
-                    aiStats = decisionStats
+                    totalLogs = recentLogs.size
                 )
             }
 
@@ -188,7 +186,7 @@ private fun TriggerTopBar(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "v2",
+                    text = "v1",
                     style = MaterialTheme.typography.labelSmall,
                     color = SciFiSecondary,
                     modifier = Modifier
@@ -230,8 +228,7 @@ private fun TriggerTopBar(
 private fun TriggerStatsCard(
     totalRules: Int,
     enabledRules: Int,
-    totalLogs: Int,
-    aiStats: ai.openclaw.android.trigger.v2.DecisionStats
+    totalLogs: Int
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -258,32 +255,6 @@ private fun TriggerStatsCard(
                 StatItem("最近日志", totalLogs.toString(), Color(0xFFF59E0B))
             }
 
-            if (aiStats.totalDecisions > 0) {
-                Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(color = SciFiOutline)
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    StatItem(
-                        "AI 决策",
-                        aiStats.llmCalls.toString(),
-                        Color(0xFF8B5CF6)
-                    )
-                    StatItem(
-                        "缓存命中",
-                        "${(aiStats.cacheHitRate * 100).toInt()}%",
-                        Color(0xFF10B981)
-                    )
-                    StatItem(
-                        "降级决策",
-                        aiStats.fallbackCalls.toString(),
-                        Color(0xFFF97316)
-                    )
-                }
-            }
         }
     }
 }

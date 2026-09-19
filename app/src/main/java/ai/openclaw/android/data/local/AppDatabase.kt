@@ -21,14 +21,12 @@ import ai.openclaw.android.trigger.models.TriggerRule
 import ai.openclaw.android.trigger.models.TriggerLog
 import ai.openclaw.android.trigger.dao.TriggerRuleDao
 import ai.openclaw.android.trigger.dao.TriggerLogDao
-import ai.openclaw.android.trigger.v2.models.TriggerEventEntity
-import ai.openclaw.android.trigger.v2.dao.TriggerEventDao
 import ai.openclaw.android.data.dao.CachedDataDao
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 @Database(
-    entities = [SessionEntity::class, MessageEntity::class, SummaryEntity::class, MemoryEntity::class, MemoryVectorEntity::class, DynamicSkillEntity::class, TriggerRule::class, TriggerLog::class, TriggerEventEntity::class, CachedDataEntity::class],
-    version = 8,
+    entities = [SessionEntity::class, MessageEntity::class, SummaryEntity::class, MemoryEntity::class, MemoryVectorEntity::class, DynamicSkillEntity::class, TriggerRule::class, TriggerLog::class, CachedDataEntity::class],
+    version = 9,
     // 开启 schema 导出（输出到 app/schemas），后续迁移可校验、可自动生成
     exportSchema = true
 )
@@ -43,7 +41,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun dynamicSkillDao(): DynamicSkillDao
     abstract fun triggerRuleDao(): TriggerRuleDao
     abstract fun triggerLogDao(): TriggerLogDao
-    abstract fun triggerEventDao(): TriggerEventDao
     abstract fun cachedDataDao(): CachedDataDao
 
     companion object {
@@ -286,26 +283,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v6 → v7：原实现创建了 trigger_events_v2 表（v2 触发引擎的日志）。
+         *
+         * S2 删除了从未被实例化的 v2 引擎，该表随之废弃（由 8→9 删除）。
+         * 迁移保留为空操作，以维持 6→7→8→9 的完整链路——否则停在 v6 的
+         * 老库会因为没有 6→7 而无路可走。
+         */
         private val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Create trigger_events_v2 table for AI-driven trigger decision logging
-                db.execSQL(
-                    "CREATE TABLE IF NOT EXISTS trigger_events_v2 (" +
-                    "id TEXT PRIMARY KEY NOT NULL, " +
-                    "triggerId TEXT NOT NULL, " +
-                    "timestamp INTEGER NOT NULL, " +
-                    "context TEXT NOT NULL, " +
-                    "decision TEXT NOT NULL, " +
-                    "userFeedback TEXT NOT NULL, " +
-                    "success INTEGER NOT NULL, " +
-                    "result TEXT, " +
-                    "error TEXT" +
-                    ")"
-                )
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_trigger_events_v2_triggerId ON trigger_events_v2(triggerId)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_trigger_events_v2_timestamp ON trigger_events_v2(timestamp)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_trigger_events_v2_decision ON trigger_events_v2(decision)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_trigger_events_v2_userFeedback ON trigger_events_v2(userFeedback)")
+                // No-op: trigger_events_v2 已废弃
+            }
+        }
+
+        /**
+         * v8 → v9：删除 trigger S2 清理掉的 trigger_events_v2 表。
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS trigger_events_v2")
             }
         }
 
@@ -340,7 +336,8 @@ abstract class AppDatabase : RoomDatabase() {
                 .openHelperFactory(factory)
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-                    MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8
+                    MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                    MIGRATION_7_8, MIGRATION_8_9
                 )
                 // 只在降级时允许重建（降级本就无法保留数据）；升级路径必须显式提供 Migration，
                 // 缺失时由 getInstance() 兜底并记录，而不再由 Room 静默清库。

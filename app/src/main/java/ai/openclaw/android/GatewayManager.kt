@@ -49,6 +49,7 @@ import ai.openclaw.android.domain.agent.AgentRouter
 import ai.openclaw.android.domain.agent.AgentSessionManager
 import ai.openclaw.android.trigger.EventBus
 import ai.openclaw.android.trigger.ActionExecutor
+import ai.openclaw.script.bridge.UiProvider
 import ai.openclaw.android.trigger.scheduler.CronScheduler
 import ai.openclaw.android.trigger.models.EventSource
 import okhttp3.OkHttpClient
@@ -345,39 +346,13 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
 
     // ========== Extended methods for ChatViewModel integration ==========
 
-    override fun getSessionManager(): HybridSessionManager? = sessionManager
-
-    override fun getMemoryManager(): MemoryManager? = memoryManager
-
-    override fun getAgentSession(): AgentSession? = agentSession
-
-    override fun getAgents(): List<AgentInfo> {
-        val configManager = agentConfigManager ?: return emptyList()
-        val defaultAgent = try {
-            configManager.getDefaultAgent()
-        } catch (e: IllegalStateException) {
-            null
-        }
-        return configManager.getAllAgents().map { agent ->
-            AgentInfo(
-                id = agent.id,
-                name = agent.name,
-                isDefault = defaultAgent?.id == agent.id
-            )
-        }
-    }
-
     override fun clearHistory() {
         agentSession?.clearHistory()
     }
 
-    override fun setScriptUiProvider(provider: Any?) {
+    override fun setScriptUiProvider(provider: UiProvider?) {
         val scriptSkill = skillManager?.getLoadedSkills()?.get("script")
             as? ai.openclaw.android.skill.builtin.ScriptSkill
-        if (provider != null && provider !is ai.openclaw.script.bridge.UiProvider) {
-            Log.w(TAG, "setScriptUiProvider: expected UiProvider but got ${provider::class.java.simpleName}")
-            return
-        }
         scriptSkill?.setUiProvider(provider)
         Log.d(TAG, "ScriptSkill UI provider set: ${provider != null}")
     }

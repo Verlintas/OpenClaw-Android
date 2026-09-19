@@ -2,16 +2,14 @@ package ai.openclaw.android
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
-import ai.openclaw.android.agent.AgentSession
 import ai.openclaw.android.agent.SessionEvent
 import ai.openclaw.android.data.model.MessageEntity
 import ai.openclaw.android.data.model.SessionEntity
 import ai.openclaw.android.domain.DeviceCapabilities
-import ai.openclaw.android.domain.memory.MemoryManager
-import ai.openclaw.android.domain.session.HybridSessionManager
 import ai.openclaw.android.model.ImageContent
 import ai.openclaw.android.model.LocalLLMClient
 import ai.openclaw.android.model.ModelProvider
+import ai.openclaw.script.bridge.UiProvider
 
 /**
  * Gateway 服务契约接口
@@ -40,23 +38,16 @@ interface GatewayContract {
 
     // ========== Extended methods for ChatViewModel integration ==========
 
-    /** 获取 HybridSessionManager，用于 Session CRUD 操作 */
-    fun getSessionManager(): HybridSessionManager?
-
-    /** 获取 MemoryManager，用于记忆查询 */
-    fun getMemoryManager(): MemoryManager?
-
-    /** 获取当前 AgentSession（用于 clearHistory 等 direct session 操作） */
-    fun getAgentSession(): AgentSession?
-
-    /** 获取可用 Agent 列表（用于多 Agent UI） */
-    fun getAgents(): List<AgentInfo>
-
     /** 清空当前会话历史 */
     fun clearHistory()
 
-    /** 注入 ScriptSkill UI Provider */
-    fun setScriptUiProvider(provider: Any?)
+    /**
+     * 注入 ScriptSkill UI Provider。
+     *
+     * 此前签名是 `Any?`，实现类只能在运行时用 `is UiProvider` 判断并打 warning，
+     * 接口完全失去类型安全。这里直接用 `:script` 模块的 `UiProvider` 类型收口。
+     */
+    fun setScriptUiProvider(provider: UiProvider?)
 
     /** 获取设备能力信息 */
     fun getDeviceCapabilities(): DeviceCapabilities?

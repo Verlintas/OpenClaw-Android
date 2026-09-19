@@ -67,7 +67,6 @@ import ai.openclaw.android.viewmodel.TriggerViewModel
 import ai.openclaw.android.ui.trigger.TriggerScreen
 import ai.openclaw.android.data.local.AppDatabase
 import ai.openclaw.android.trigger.v2.TriggerConfigManager
-import ai.openclaw.android.trigger.v2.TriggerEngine
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CoroutineScope
@@ -98,7 +97,6 @@ class MainActivity : ComponentActivity() {
     // 负责在应用启动时种入 5 个预设模板，并提供给 TriggerViewModel）。
     // 改为 State：加密数据库的打开与 initDefaults() 放到 IO 线程，避免主线程 ANR。
     private val triggerConfigManagerState = mutableStateOf<TriggerConfigManager?>(null)
-    private var triggerEngine: TriggerEngine? = null
 
     /** Room 实例（IO 线程初始化），供触发器 Tab 等 UI 复用，避免主线程打开加密库 */
     private val databaseState = mutableStateOf<AppDatabase?>(null)

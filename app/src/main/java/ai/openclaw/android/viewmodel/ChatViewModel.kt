@@ -28,6 +28,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -262,8 +263,17 @@ class ChatViewModel : ViewModel() {
                     return@launch
                 }
 
-                // Fallback to AgentSession via GatewayContract
-                sendMessageViaSession(text)
+                // 回退路径仍走 GatewayContract.sendMessage()，与 RealGateway 是同一入口
+                // （含多 Agent 路由）。此前这里是直接取 AgentSession，既绕过路由、又会丢弃图片。
+                val contract = gatewayContractProvider?.invoke()
+                if (contract != null) {
+                    sendMessageViaContract(contract, text, images)
+                } else {
+                    val msgs = _messages.value.toMutableList()
+                    msgs.add(ChatMessage(role = "assistant", content = "服务未就绪，请稍候或检查设置"))
+                    _messages.value = msgs
+                    _isLoading.value = false
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Chat error: ${e.message}", e)
                 val updated = _messages.value.toMutableList()
@@ -291,25 +301,24 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /** 通过 GatewayContract 获取 AgentSession 发送消息 */
-    private suspend fun sendMessageViaSession(text: String) {
-        val gateway = gatewayContractProvider?.invoke()
-        val session = gateway?.getAgentSession()
-        if (session == null) {
-            val msgs = _messages.value.toMutableList()
-            msgs.add(ChatMessage(role = "assistant", content = "服务未就绪，请稍候或检查设置"))
-            _messages.value = msgs
-            _isLoading.value = false
-            return
-        }
-
+    /**
+     * 直接通过 GatewayContract 发送消息。
+     *
+     * 与 RealGateway 走的是同一个 `GatewayContract.sendMessage()`，因此多 Agent 路由、
+     * 图片透传行为一致，不存在"两条语义不同的路径"。
+     */
+    private suspend fun sendMessageViaContract(
+        contract: GatewayContract,
+        text: String,
+        images: List<ImageContent>
+    ) {
         val responseId = java.util.UUID.randomUUID().toString()
         val msgs = _messages.value.toMutableList()
         msgs.add(ChatMessage(id = responseId, role = "assistant", content = ""))
         _messages.value = msgs
         val responseIndex = msgs.lastIndex
 
-        session.handleMessageStream(text).collect { event ->
+        contract.sendMessage(text, images.ifEmpty { null }).collect { event ->
             handleSessionEvent(event, responseIndex)
         }
     }
@@ -383,9 +392,8 @@ class ChatViewModel : ViewModel() {
      * 处理语音输入，返回需要朗读的文本
      */
     suspend fun handleVoiceInput(text: String): String {
-        val gateway = gatewayContractProvider?.invoke()
-        val session = gateway?.getAgentSession()
-        if (session == null) return "请先在设置中配置 API Key"
+        val contract = gatewayContractProvider?.invoke()
+            ?: return "请先在设置中配置 API Key"
 
         // 添加用户消息
         val currentMessages = _messages.value.toMutableList()
@@ -396,21 +404,16 @@ class ChatViewModel : ViewModel() {
         val msgs = _messages.value.toMutableList()
         msgs.add(ChatMessage(id = responseId, role = "assistant", content = ""))
         _messages.value = msgs
+        val responseIndex = msgs.lastIndex
 
-        var fullResponse = ""
-        session.handleMessageStream(text).collect { event ->
-            when (event) {
-                is SessionEvent.Token -> fullResponse += event.text
-                is SessionEvent.Complete -> fullResponse = event.fullText
-                else -> {}
-            }
-        }
+        // 与文本发送走同一入口（含多 Agent 路由），不再直接持有 AgentSession，
+        // 也不再重复实现一份 SessionEvent 处理逻辑。
+        val fullResponse = collectResponse(contract.sendMessage(text, null), responseIndex)
 
         // Parse and route the response for voice session
         val parsedResponse = parseAgentResponse(fullResponse)
-        val deliverable = responseRouter?.route(parsedResponse)
+        val deliverable = _lastDeliverable.value
             ?: Deliverable.PlainText(parsedResponse.fallbackText)
-        _lastDeliverable.value = deliverable
 
         // For voice sessions, return the voice text if available
         val speakText = when (deliverable) {
@@ -422,10 +425,26 @@ class ChatViewModel : ViewModel() {
 
         // 更新最终响应
         val finalMessages = _messages.value.toMutableList()
-        finalMessages[msgs.lastIndex] = finalMessages[msgs.lastIndex].copy(content = speakText)
+        finalMessages[responseIndex] = finalMessages[responseIndex].copy(content = speakText)
         _messages.value = finalMessages
 
         return speakText.ifEmpty { "抱歉，我没有理解您的问题" }
+    }
+
+    /**
+     * 收集流式响应，复用统一的 [handleSessionEvent]，并返回最终完整文本。
+     * 语音与文本两条链路共用，避免事件处理逻辑出现两份实现。
+     */
+    private suspend fun collectResponse(
+        events: Flow<SessionEvent>,
+        responseIndex: Int
+    ): String {
+        var fullText = ""
+        events.collect { event ->
+            if (event is SessionEvent.Complete) fullText = event.fullText
+            handleSessionEvent(event, responseIndex)
+        }
+        return fullText
     }
 
     // ==================== 配置更新 ====================
