@@ -154,8 +154,9 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         val sessionManager = agentSessionManager
         if (router != null && sessionManager != null) {
             val agentId = router.route(text)
-            val session = sessionManager.getOrCreate(agentId)
-            return session.handleMessageStream(text, images)
+            // 经 actor 串行进入会话：UI 重发/多入口并发时按 FIFO 排队，
+            // 而不是并发直调 session 在锁上互相阻塞
+            return sessionManager.streamMessage(agentId, text, images)
         }
         // Backward compatibility: single-agent fallback
         return agentSession?.handleMessageStream(text, images)
@@ -723,10 +724,16 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
 
     private fun handleFeishuEvent(event: FeishuEvent) {
         if (event.type == "im.message.receive_v1") {
-            val message = event.event?.message
-            if (message != null) {
-                serviceScope.launch {
-                    agentSession?.handleMessage(message.content)
+            val message = event.event?.message ?: return
+            val sessionManager = agentSessionManager ?: return
+            val defaultAgentId = agentConfigManager?.getDefaultAgent()?.id ?: return
+            serviceScope.launch {
+                try {
+                    // 经 actor 串行进入 default agent 会话，与 UI 入口互不交错。
+                    // TODO(PR-3): 收集流式事件回发飞书
+                    sessionManager.streamMessage(defaultAgentId, message.content).collect { /* PR-3 接回发 */ }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Feishu message handling failed: ${e.message}", e)
                 }
             }
         }

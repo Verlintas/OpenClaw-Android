@@ -193,9 +193,7 @@ class AgentSessionFactoryTest {
         )
 
         // Verify system prompt contains custom text
-        val historyField = session::class.java.getDeclaredField("history")
-        historyField.isAccessible = true
-        // history is empty until a message is sent, but we can verify config is stored
+        // (config is stored; prompt merging is exercised via handleMessage tests)
         val configField = getPrivateField(session, "_agentConfig") as AgentConfig?
         assertEquals("You are a coding expert.", configField?.systemPrompt)
     }

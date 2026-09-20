@@ -3,7 +3,9 @@ package ai.openclaw.android.domain.agent
 import ai.openclaw.android.ConfigManager
 import ai.openclaw.android.accessibility.AccessibilityBridge
 import ai.openclaw.android.agent.AgentSession
+import ai.openclaw.android.agent.SessionEvent
 import ai.openclaw.android.data.model.AgentConfig
+import ai.openclaw.android.model.ImageContent
 import ai.openclaw.android.model.OpenAIClient
 import ai.openclaw.android.model.AnthropicClient
 import ai.openclaw.android.model.LocalLLMClient
@@ -13,6 +15,14 @@ import ai.openclaw.android.permission.PermissionManager
 import ai.openclaw.android.skill.SkillManager
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 
 /**
  * Manages multiple AgentSession instances with lazy creation, caching, and LRU eviction.
@@ -43,6 +53,32 @@ open class AgentSessionManager(
 
     private val sessionCache = mutableMapOf<String, AgentSession>()
     private val accessOrder = mutableListOf<String>() // LRU tracking
+
+    // ==================== Actor 层（并发入口串行化） ====================
+
+    /**
+     * Actor 宿主：独立于调用方 scope，单消费者协程按 agent 隔离。
+     * SupervisorJob 保证单个 actor 崩溃不影响其他 agent 的队列。
+     */
+    private val actorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val actors = mutableMapOf<String, AgentActor>()
+
+    /**
+     * 经 actor 串行投递一轮对话，返回流式事件。
+     *
+     * 所有非 UI 入口（飞书、触发器、定时任务）必须走此方法而不是直接拿
+     * session 调 handleMessageStream —— 多入口并发直调会在同一 session 上
+     * 交错推进对话轮次（用户消息与工具结果交叉写入）。
+     * AgentSession 内部的整轮锁保证正确性，actor 在此之上提供 FIFO 排队，
+     * 让后到的消息等前一轮完成而不是互相阻塞。
+     */
+    fun streamMessage(agentId: String, text: String, images: List<ImageContent>? = null): Flow<SessionEvent> {
+        val session = getOrCreate(agentId)
+        val actor = synchronized(actors) {
+            actors.getOrPut(agentId) { AgentActor(agentId, session, actorScope) }
+        }
+        return actor.submit(text, images)
+    }
 
     /**
      * Get or create an AgentSession for the given agent ID.
@@ -94,8 +130,11 @@ open class AgentSessionManager(
 
     /**
      * Remove a session from cache.
+     * 同时停掉该 agent 的 actor —— 缓存的 session 已被丢弃，actor 若继续
+     * 持有旧引用会把后续消息写进一个不再被任何入口可见的会话。
      */
     fun evict(agentId: String) {
+        synchronized(actors) { actors.remove(agentId) }?.shutdown()
         sessionCache.remove(agentId)
         accessOrder.remove(agentId)
         Log.d(TAG, "Evicted session for '$agentId'")
@@ -108,8 +147,15 @@ open class AgentSessionManager(
 
     /**
      * Clean up all sessions.
+     * 只 shutdown actor（consumer 协程），不取消 actorScope —— manager 若被
+     * 复用（测试/重置场景），后续 streamMessage 仍可在同一 scope 上启动新
+     * consumer；取消 scope 会让后续消息静默堆积在 mailbox 里无人消费。
      */
     fun cleanup() {
+        synchronized(actors) {
+            actors.values.forEach { it.shutdown() }
+            actors.clear()
+        }
         sessionCache.clear()
         accessOrder.clear()
         Log.i(TAG, "All sessions cleaned up")
@@ -176,8 +222,72 @@ open class AgentSessionManager(
     private fun evictIfNecessary() {
         while (sessionCache.size >= maxCachedSessions && accessOrder.isNotEmpty()) {
             val oldest = accessOrder.removeAt(0)
+            synchronized(actors) { actors.remove(oldest) }?.shutdown()
             sessionCache.remove(oldest)
             Log.d(TAG, "LRU evicted: '$oldest'")
         }
+    }
+}
+
+/**
+ * 单 agent 的消息 actor：Channel.UNLIMITED mailbox + 单消费者协程。
+ *
+ * 把并发提交到同一 agent 的对话请求按 FIFO 串行送到同一 AgentSession。
+ * AgentSession 的整轮锁已经保证正确性（不会交错写坏状态），actor 的价值
+ * 是非阻塞排队语义：后到的请求先挂起等 mailbox，而不是全部堵在锁上；
+ * 收集方取消只取消当前请求（经 finally 写回部分状态），actor 存活。
+ */
+private class AgentActor(
+    private val agentId: String,
+    private val session: AgentSession,
+    scope: CoroutineScope
+) {
+    private class ChatRequest(
+        val message: String,
+        val images: List<ImageContent>?,
+        val events: Channel<SessionEvent>
+    )
+
+    private val mailbox = Channel<ChatRequest>(Channel.UNLIMITED)
+    private val consumer = scope.launch {
+        for (request in mailbox) {
+            try {
+                session.handleMessageStream(request.message, request.images)
+                    .collect { event -> request.events.send(event) }
+            } catch (e: Exception) {
+                // 单个请求失败/取消不杀 actor：CancellationException 也走这里，
+                // finally 关闭事件通道后继续消费下一条消息
+                Log.w(TAG_AGENT_ACTOR, "Request failed for '$agentId': ${e.message}")
+            } finally {
+                request.events.close()
+            }
+        }
+    }
+
+    fun submit(message: String, images: List<ImageContent>? = null): Flow<SessionEvent> = flow {
+        val request = ChatRequest(message, images, Channel(Channel.BUFFERED))
+        mailbox.send(request)
+        try {
+            for (event in request.events) emit(event)
+        } finally {
+            // 收集方取消 → 关闭事件通道，consumer 侧 send 抛取消，
+            // 传播为 session 流的取消（其 finally 写回部分状态）
+            request.events.cancel()
+        }
+    }.flowOn(Dispatchers.Default)
+
+    fun shutdown() {
+        consumer.cancel()
+        mailbox.close()
+        // drain：为已排队但未处理的请求关闭事件通道，
+        // 否则对应收集方会在 `for (event in events)` 上永久挂起
+        while (true) {
+            val queued = mailbox.tryReceive().getOrNull() ?: break
+            queued.events.close()
+        }
+    }
+
+    private companion object {
+        const val TAG_AGENT_ACTOR = "AgentActor"
     }
 }

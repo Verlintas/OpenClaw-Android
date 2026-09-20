@@ -11,10 +11,18 @@ import ai.openclaw.android.skill.ToolDefinition
 import android.content.Context
 import android.util.Log
 import io.mockk.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Unit tests for AgentSessionManager.
@@ -363,6 +371,92 @@ class AgentSessionManagerTest {
         val session2 = manager.getOrCreate("main")
 
         assertNotSame("Should always create new session with 0 cache", session1, session2)
+    }
+
+    // ============ Test: actor 层串行化（PR-1） ============
+
+    @Test
+    fun `streamMessage serializes concurrent submissions in FIFO order`() = runBlocking {
+        val config = AgentConfig(id = "main", name = "Main")
+        every { mockConfigManager.getAgentById("main") } returns config
+        every { mockConfigManager.getDefaultAgent() } returns config
+
+        // 记录每次 LLM 调用看到的最后一条 user 消息 —— actor FIFO 下应严格等于提交顺序
+        val llmOrder = CopyOnWriteArrayList<String>()
+        every { mockModelClient.chatStream(any(), any()) } answers {
+            val messages = firstArg<List<ai.openclaw.android.model.Message>>()
+            val lastUser = messages.last { it.role == "user" }.content
+            flow {
+                llmOrder.add(lastUser)
+                emit(
+                    ai.openclaw.android.model.ChatEvent.Complete(
+                        ai.openclaw.android.model.ModelResponse(
+                            choices = listOf(
+                                ai.openclaw.android.model.Choice(
+                                    message = ai.openclaw.android.model.ResponseMessage(
+                                        role = "assistant",
+                                        content = "reply-$lastUser"
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            }
+        }
+
+        val manager = createManager()
+        val results = (1..5).map { i ->
+            async {
+                manager.streamMessage("main", "m$i")
+                    .filterIsInstance<ai.openclaw.android.agent.SessionEvent.Complete>()
+                    .first()
+                    .fullText
+            }
+        }
+        val replies = results.awaitAll()
+
+        // runBlocking 单线程 event loop：async 顺序触发 collect → mailbox.send 顺序 = m1..m5
+        assertEquals(listOf("m1", "m2", "m3", "m4", "m5"), llmOrder)
+        assertEquals(listOf("reply-m1", "reply-m2", "reply-m3", "reply-m4", "reply-m5"), replies)
+        manager.cleanup()
+    }
+
+    @Test
+    fun `streamMessage works after evict shut down the previous actor`() = runBlocking {
+        val config = AgentConfig(id = "main", name = "Main")
+        every { mockConfigManager.getAgentById("main") } returns config
+        every { mockConfigManager.getDefaultAgent() } returns config
+        every { mockModelClient.chatStream(any(), any()) } returns flow {
+            emit(
+                ai.openclaw.android.model.ChatEvent.Complete(
+                    ai.openclaw.android.model.ModelResponse(
+                        choices = listOf(
+                            ai.openclaw.android.model.Choice(
+                                message = ai.openclaw.android.model.ResponseMessage(role = "assistant", content = "ok")
+                            )
+                        )
+                    )
+                )
+            )
+        }
+
+        val manager = createManager()
+        // 先跑一轮建立 actor，再 evict（shutdown consumer + drain mailbox）
+        manager.streamMessage("main", "warmup")
+            .filterIsInstance<ai.openclaw.android.agent.SessionEvent.Complete>()
+            .first()
+        manager.evict("main")
+
+        // evict 后 streamMessage 建新 actor（绑定新 session），不应卡死或串台
+        val reply = withTimeout(5_000) {
+            manager.streamMessage("main", "after-evict")
+                .filterIsInstance<ai.openclaw.android.agent.SessionEvent.Complete>()
+                .first()
+                .fullText
+        }
+        assertEquals("ok", reply)
+        manager.cleanup()
     }
 
     // ============ Testable subclass ============

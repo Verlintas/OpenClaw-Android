@@ -21,12 +21,14 @@ import ai.openclaw.android.permission.PermissionManager
 import ai.openclaw.android.skill.SkillManager
 import ai.openclaw.android.skill.SkillParam
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * AgentSession - Manages conversation context and model interactions
@@ -111,7 +113,12 @@ class AgentSession(
     }
     companion object {
         private const val TAG = "AgentSession"
-        private const val MAX_TOOL_ROUNDS = 50
+        private const val MAX_TOOL_ROUNDS = 15
+
+        /** 运行时权限弹窗等待上限（超时按未授权处理，防止会话永久挂起） */
+        private const val PERMISSION_REQUEST_TIMEOUT_MS = 60_000L
+        /** trim 预算下限，避免系统 prompt 过长时把预算压成负数 */
+        private const val MIN_TRIM_BUDGET = 1000
 
         /** Parse reflection strategy name (case-insensitive) from JSON config; null/unknown → NONE */
         private fun parseReflectionStrategy(raw: String?): ReflectionStrategy =
@@ -400,7 +407,13 @@ Example:
 }"""
     }
 
-    private val history: MutableList<Message> = mutableListOf()
+    // ==================== 单一状态源 ====================
+    // 会话的唯一真源：不可变 AgentState。所有入口（UI 流式 / 飞书同步 / 触发器）
+    // 的完整一轮对话都在 stateMutex 内推进（入口快照 → 循环 → 出口写回），
+    // 取消/异常经 finally + NonCancellable 写回已达状态，不回滚。
+    private val stateMutex = Mutex()
+    @Volatile private var currentState: AgentState = AgentState()
+
     private var tools: List<Tool> = emptyList()
     private var toolExecutor: (suspend (ToolCall) -> String)? = null
     private val toolExecutionMutex = Mutex()
@@ -550,62 +563,87 @@ Example:
     // ==================== Synchronous API (backward compat) ====================
 
     suspend fun handleMessage(userMessage: String, images: List<ImageContent>? = null): String {
-        history.add(Message(role = "user", content = userMessage, images = images))
         refreshMemoryContext()
         persistMessage("user", userMessage)
         val activeTools = tools.takeIf { it.isNotEmpty() }
-
-        // State machine loop
-        var state = AgentState(history = history.toList())
+        val detector = ToolLoopDetector()
+        var state: AgentState? = null
+        var committed = false
         var error: String? = null
+        var content = ""
 
-        for (r in 1..MAX_TOOL_ROUNDS) {
-            // Step 1: Call LLM (includes building messages)
-            val callResult = callLLMStep(state, activeTools)
-            if (callResult.first != null) {
-                error = callResult.first!!
-                break
+        try {
+            stateMutex.withLock {
+                // 入口快照：以 currentState 为基底追加用户消息，整轮在锁内推进
+                var s = currentState.copy(
+                    history = currentState.history + Message(role = "user", content = userMessage, images = images),
+                    round = 0
+                )
+                state = s
+
+                for (r in 1..MAX_TOOL_ROUNDS) {
+                    // Step 1: Call LLM (includes building messages)
+                    val callResult = callLLMStep(s, activeTools)
+                    if (callResult.first != null) {
+                        error = callResult.first!!
+                        break
+                    }
+                    s = callResult.second
+                    state = s // 同步快照：LLM 轮完成后取消，写回点即此
+                    Log.d(TAG, "[State] Round $r → ${s.dump()}")
+
+                    // Step 2: Check if final answer
+                    if (!s.needsToolExecution) {
+                        break
+                    }
+
+                    // Step 3: Execute tools (with loop detection)
+                    val (next, loopMsg) = executeToolsWithLoopGuard(s, detector)
+                    s = next
+                    state = s // 同步快照：工具轮完成后取消，写回点即此
+                    Log.d(TAG, "[State] After tools → ${s.dump()}")
+                    if (loopMsg != null) break
+                }
+
+                if (error == null && !s.isFinalAnswer) {
+                    // Force final response if max rounds exceeded
+                    Log.w(TAG, "[State] Max rounds exceeded, forcing final response")
+                    // 【Bugly 埋点】
+                    CrashRecord.logAgentSessionError("max_rounds_exceeded", s.dump(), null)
+                    val messages = buildMessagesInternal(s.history)
+                    val result = modelClient.chat(messages, null)
+                    val forced = result.getOrDefault(ModelResponse()).content ?: "操作完成"
+                    s = s.copy(
+                        history = s.history + Message(role = "assistant", content = forced),
+                        finalContent = forced,
+                        currentToolCalls = null,
+                        round = s.round + 1
+                    )
+                    state = s
+                }
+
+                content = s.finalContent ?: ""
+                currentState = commitTrimmed(s)
+                committed = true
             }
-            state = callResult.second
-            Log.d(TAG, "[State] Round $r → ${state.dump()}")
-
-            // Step 2: Check if final answer
-            if (!state.needsToolExecution) {
-                break
+        } finally {
+            val s = state
+            if (!committed && s != null) {
+                // 取消/异常路径：保留已达状态（含用户消息与已完成轮次），
+                // 修复孤儿 tool 块后写回，不回滚 —— 避免"消失的用户消息"。
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        currentState = commitTrimmed(repairTrailingToolBlock(s.history).let { s.copy(history = it) })
+                    }
+                }
+                Log.w(TAG, "[State] Turn interrupted, partial state committed (history=${s.history.size})")
             }
-
-            // Step 3: Execute tools
-            state = executeToolsStep(state)
-            Log.d(TAG, "[State] After tools → ${state.dump()}")
         }
 
-        // Handle error
         if (error != null) {
             Log.e(TAG, "[State] ERROR → $error")
             return error
         }
-
-        // Force final response if max rounds exceeded
-        if (!state.isFinalAnswer) {
-            Log.w(TAG, "[State] Max rounds exceeded, forcing final response")
-            // 【Bugly 埋点】
-            CrashRecord.logAgentSessionError("max_rounds_exceeded", state.dump(), null)
-            val messages = buildMessagesInternal(state.history)
-            val result = modelClient.chat(messages, null)
-            val content = result.getOrDefault(ModelResponse()).content ?: "操作完成"
-            state = state.copy(
-                history = state.history + Message(role = "assistant", content = content),
-                finalContent = content,
-                currentToolCalls = null,
-                round = state.round + 1
-            )
-        }
-
-        // Sync state history back to mutable history
-        val content = state.finalContent ?: ""
-        history.clear()
-        history.addAll(state.history)
-        trimHistoryByTokens()
         persistMessage("assistant", content)
         return content
     }
@@ -657,29 +695,64 @@ Example:
         }
     }
 
-    /** Execute pending tool calls and add results to history */
-    private suspend fun executeToolsStep(state: AgentState): AgentState {
-        val toolCalls = state.currentToolCalls ?: return state
-        var newHistory = state.history
+    /**
+     * Execute pending tool calls and add results to history.
+     *
+     * 带循环检测：同 (toolName, argsHash) 在窗口内重复达到阈值时终止本轮，
+     * 并为剩余未执行的 toolCall 补合成 tool 结果 —— 保证每个 toolCallId
+     * 都有配对的 tool 消息，避免下一轮请求被 API 以 2013 拒绝。
+     *
+     * @return (newState, loopMessage?) — loopMessage 非空表示因循环终止
+     */
+    private suspend fun executeToolsWithLoopGuard(
+        state: AgentState,
+        detector: ToolLoopDetector,
+        onBefore: suspend (String) -> Unit = {},
+        onResult: suspend (String, String) -> Unit = { _, _ -> }
+    ): Pair<AgentState, String?> {
+        val toolCalls = state.currentToolCalls ?: return state to null
+        var history = state.history
 
-        for (toolCall in toolCalls) {
+        for ((index, toolCall) in toolCalls.withIndex()) {
             val toolName = toolCall.function.name
-            Log.d(TAG, "[Tool] Executing $toolName, args: ${toolCall.function.arguments}")
+            onBefore(toolName)
+            val looped = detector.recordAndCheck(toolName, toolCall.function.arguments)
 
-            val result = executeToolCall(toolCall)
-            Log.d(TAG, "[Tool] $toolName → ${result.take(100)}")
+            val result = if (looped) {
+                "已终止：同一工具以相同参数重复调用达到上限"
+            } else {
+                Log.d(TAG, "[Tool] Executing $toolName, args: ${toolCall.function.arguments}")
+                val r = executeToolCall(toolCall)
+                Log.d(TAG, "[Tool] $toolName → ${r.take(100)}")
+                r
+            }
+            onResult(toolName, result)
+            history += Message(role = "tool", content = result, toolCallId = toolCall.id)
 
-            newHistory += Message(
-                role = "tool",
-                content = result,
-                toolCallId = toolCall.id
-            )
+            if (looped) {
+                // 剩余未执行的调用补合成结果（孤儿防护）
+                for (remaining in toolCalls.drop(index + 1)) {
+                    history += Message(
+                        role = "tool",
+                        content = "已跳过：工具调用循环检测触发",
+                        toolCallId = remaining.id
+                    )
+                }
+                val message = "已重复调用同一工具（$toolName），请换一种策略完成任务。"
+                Log.w(TAG, "[State] Tool loop detected on $toolName, terminating turn")
+                CrashRecord.logAgentSessionError("tool_loop_detected", "tool=$toolName", null)
+                return state.copy(
+                    history = history + Message(role = "assistant", content = message),
+                    currentToolCalls = null,
+                    finalContent = message
+                ) to message
+            }
         }
 
         return state.copy(
-            history = newHistory,
+            history = history,
             currentToolCalls = null
-        )
+        ) to null
     }
 
     /** Build messages list from AgentState for LLM call */
@@ -696,135 +769,136 @@ Example:
     /**
      * Streaming variant — emits tokens and tool events in real-time.
      * The flow completes with a [SessionEvent.Complete] containing the full text.
-     * Uses AgentState for state machine tracking.
+     *
+     * 整轮在 stateMutex 内推进；取消/异常经 finally + NonCancellable 写回
+     * 已达状态（修复孤儿 tool 块），不回滚。
      */
     fun handleMessageStream(userMessage: String, images: List<ImageContent>? = null): Flow<SessionEvent> = flow {
-        history.add(Message(role = "user", content = userMessage, images = images))
         refreshMemoryContext()
         persistMessage("user", userMessage)
         val activeTools = tools.takeIf { it.isNotEmpty() }
+        val detector = ToolLoopDetector()
+        var state: AgentState? = null
+        var committed = false
 
-        var state = AgentState(history = history.toList())
-        var finalContent: String? = null
-        var hasError = false
-
-        for (r in 1..MAX_TOOL_ROUNDS) {
-            // Step 1: Build messages
-            state = state.copy(round = r)
-            Log.d(TAG, "[State] Round $r start → ${state.dump()}")
-
-            // Step 2: Call LLM (streaming)
-            val messages = buildMessagesFromState(state, true)
-            val fullText = StringBuilder()
-            var completeResponse: ModelResponse? = null
-
-            modelClient.chatStream(messages, activeTools).collect { event ->
-                when (event) {
-                    is ChatEvent.Token -> {
-                        fullText.append(event.text)
-                        emit(SessionEvent.Token(event.text))
-                    }
-                    is ChatEvent.Complete -> completeResponse = event.response
-                    is ChatEvent.Error -> {
-                        emit(SessionEvent.Error(event.message))
-                        hasError = true
-                        return@collect
-                    }
-                    is ChatEvent.ToolCallRequested -> {}
-                }
-            }
-
-            if (hasError) return@flow
-
-            val response = completeResponse
-            if (response == null) {
-                val text = fullText.toString()
-                if (text.isNotEmpty()) {
-                    history.add(Message(role = "assistant", content = text))
-                    trimHistoryByTokens()
-                    persistMessage("assistant", text)
-                    emit(SessionEvent.Complete(text))
-                } else {
-                    emit(SessionEvent.Error("No response from model"))
-                }
-                return@flow
-            }
-
-            val toolCalls = response.toolCalls
-            if (toolCalls.isNullOrEmpty()) {
-                // Final text response — apply reflection if configured
-                var content = response.content ?: fullText.toString()
-                state = state.copy(
-                    history = state.history + Message(role = "assistant", content = content),
-                    currentToolCalls = null,
-                    finalContent = content
+        try {
+            stateMutex.withLock {
+                var s = currentState.copy(
+                    history = currentState.history + Message(role = "user", content = userMessage, images = images),
+                    round = 0
                 )
-                Log.d(TAG, "[State] Final answer → ${state.dump()}")
+                state = s
+                var errorText: String? = null
+                var pendingComplete: String? = null
 
-                // Apply reflection
-                content = applyReflection(state, content) { event -> emit(event) }
-                finalContent = content
-                state = state.copy(
-                    history = state.history.dropLast(1) + Message(role = "assistant", content = content),
-                    finalContent = content,
-                    reflectionApplied = true
-                )
+                for (r in 1..MAX_TOOL_ROUNDS) {
+                    s = s.copy(round = r)
+                    Log.d(TAG, "[State] Round $r start → ${s.dump()}")
 
-                history.add(Message(role = "assistant", content = content))
-                trimHistoryByTokens()
-                persistMessage("assistant", content)
-                emit(SessionEvent.Complete(content))
-                return@flow
-            }
+                    val messages = buildMessagesFromState(s, true)
+                    val fullText = StringBuilder()
+                    var completeResponse: ModelResponse? = null
 
-            // Tool calls — update state and execute
-            state = state.copy(
-                history = state.history + Message(
-                    role = "assistant",
-                    content = "",
-                    toolCalls = toolCalls
-                ),
-                currentToolCalls = toolCalls
-            )
-            // [FIX] sync mutable history list with state.history so the legacy
-            // history list (consumed by trimHistoryByTokens and the next round's
-            // buildMessagesFromState) stays in lock-step with state. Previously
-            // only tool messages were appended to history, leaving the
-            // assistant(tool_calls) message absent — subsequent rounds would
-            // then send a tool result whose tool_call_id had no matching
-            // assistant(tool_calls) preceding it, triggering the API
-            // 'tool result's tool id(...) not found' (2013) error.
-            history.add(Message(
-                role = "assistant",
-                content = "",
-                toolCalls = toolCalls
-            ))
-            Log.d(TAG, "[State] Tool calls → ${state.dump()}")
+                    modelClient.chatStream(messages, activeTools).collect { event ->
+                        when (event) {
+                            is ChatEvent.Token -> {
+                                fullText.append(event.text)
+                                emit(SessionEvent.Token(event.text))
+                            }
+                            is ChatEvent.Complete -> completeResponse = event.response
+                            is ChatEvent.Error -> {
+                                emit(SessionEvent.Error(event.message))
+                                errorText = event.message
+                            }
+                            is ChatEvent.ToolCallRequested -> {}
+                        }
+                    }
+                    if (errorText != null) break
 
-            // Execute tools
-            for (toolCall in toolCalls) {
-                emit(SessionEvent.ToolExecuting(toolCall.function.name))
-                val result = executeToolCall(toolCall)
-                history.add(Message(
-                    role = "tool",
-                    content = result,
-                    toolCallId = toolCall.id
-                ))
-                state = state.copy(
-                    history = state.history + Message(
-                        role = "tool",
-                        content = result,
-                        toolCallId = toolCall.id
+                    val response = completeResponse
+                    if (response == null) {
+                        val text = fullText.toString()
+                        if (text.isNotEmpty()) {
+                            s = s.copy(
+                                history = s.history + Message(role = "assistant", content = text),
+                                currentToolCalls = null,
+                                finalContent = text
+                            )
+                            state = s // 同步快照
+                            pendingComplete = text
+                        } else {
+                            errorText = "No response from model"
+                        }
+                        break
+                    }
+
+                    val toolCalls = response.toolCalls
+                    if (toolCalls.isNullOrEmpty()) {
+                        // Final text response — apply reflection if configured
+                        var content = response.content ?: fullText.toString()
+                        s = s.copy(
+                            history = s.history + Message(role = "assistant", content = content),
+                            currentToolCalls = null,
+                            finalContent = content
+                        )
+                        state = s // 同步快照（reflection 前的最终答案已入史）
+
+                        Log.d(TAG, "[State] Final answer → ${s.dump()}")
+
+                        content = applyReflection(s, content) { event -> emit(event) }
+                        s = s.copy(
+                            history = s.history.dropLast(1) + Message(role = "assistant", content = content),
+                            finalContent = content,
+                            reflectionApplied = true
+                        )
+                        state = s // 同步快照（reflection 后）
+                        pendingComplete = content
+                        break
+                    }
+
+                    s = s.copy(
+                        history = s.history + Message(role = "assistant", content = "", toolCalls = toolCalls),
+                        currentToolCalls = toolCalls
                     )
-                )
-                emit(SessionEvent.ToolResult(toolCall.function.name, result))
-            }
-            // Clear tool calls from state (they've been executed)
-            state = state.copy(currentToolCalls = null)
-            Log.d(TAG, "[State] Tools done → ${state.dump()}")
-        }
+                    state = s // 同步快照：工具执行前（最长挂起点，取消高发区）
+                    Log.d(TAG, "[State] Tool calls → ${s.dump()}")
 
-        emit(SessionEvent.Error("Exceeded max tool rounds. Last state: ${state.dump()}"))
+                    val (next, loopMsg) = executeToolsWithLoopGuard(
+                        s, detector,
+                        onBefore = { name -> emit(SessionEvent.ToolExecuting(name)) },
+                        onResult = { name, result -> emit(SessionEvent.ToolResult(name, result)) }
+                    )
+                    s = next
+                    state = s // 同步快照：工具轮完成后
+                    Log.d(TAG, "[State] Tools done → ${s.dump()}")
+                    if (loopMsg != null) {
+                        pendingComplete = loopMsg
+                        break
+                    }
+                }
+
+                if (pendingComplete != null) {
+                    persistMessage("assistant", pendingComplete)
+                    emit(SessionEvent.Complete(pendingComplete))
+                } else if (errorText != null) {
+                    emit(SessionEvent.Error(errorText!!))
+                } else {
+                    emit(SessionEvent.Error("Exceeded max tool rounds. Last state: ${s.dump()}"))
+                }
+                currentState = commitTrimmed(s)
+                committed = true
+            }
+        } finally {
+            val s = state
+            if (!committed && s != null) {
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        currentState = commitTrimmed(s.copy(history = repairTrailingToolBlock(s.history)))
+                    }
+                }
+                Log.w(TAG, "[State] Stream interrupted, partial state committed (history=${s.history.size})")
+            }
+        }
     }.flowOn(Dispatchers.Default)
 
     /** Apply reflection to final content, emit events via callback */
@@ -890,11 +964,14 @@ Example:
                             val requiredPerms = PermissionManager.getPermissionsForSkill(skillId)
                                 ?: emptyArray()
                             val displayName = PermissionManager.getSkillDisplayName(skillId)
-                            val granted = withContext(Dispatchers.Main) {
-                                permMgr.requestPermission(requiredPerms, skillId, displayName)
-                            }
+                            // 授权等待限时：超时按未授权处理，防止整轮会话因弹窗无人响应而永久挂起
+                            val granted = withTimeoutOrNull(PERMISSION_REQUEST_TIMEOUT_MS) {
+                                withContext(Dispatchers.Main) {
+                                    permMgr.requestPermission(requiredPerms, skillId, displayName)
+                                }
+                            } ?: false
                             if (!granted) {
-                                return@withContext "需要权限: ${permCheck.second}。请在设置中授权。"
+                                return@withContext "需要权限（授权超时或被拒绝）: ${permCheck.second}。请在设置中授权。"
                             }
                         } else {
                             return@withContext "需要权限: ${permCheck.second}。请在设置中授权。"
@@ -929,56 +1006,60 @@ Example:
 
     // ==================== History Management ====================
 
-    private fun buildMessagesInternal(currentHistory: List<Message>): List<Message> {
-        // Build base system prompt
+    private fun buildMessagesInternal(currentHistory: List<Message>): List<Message> =
+        buildSystemMessages() + currentHistory
+
+    /** 进入每轮消息列表头部的系统块：system prompt + 记忆上下文 */
+    private fun buildSystemMessages(): List<Message> {
         val basePrompt = _agentConfig?.systemPrompt?.takeIf { it.isNotBlank() }
             ?.let { customPrompt -> "$customPrompt\n\n---\n$BASE_SYSTEM_PROMPT" }
             ?: BASE_SYSTEM_PROMPT
 
-        // Prepend device capabilities section if available
         val systemPrompt = deviceCapabilities?.let { caps ->
             "${caps.toPromptSection()}\n\n---\n$basePrompt"
         } ?: basePrompt
 
-        return mutableListOf<Message>().apply {
+        return buildList {
             add(Message(role = "system", content = systemPrompt))
             memoryContextText?.let { context ->
                 add(Message(role = "system", content = "用户的重要记忆：\n$context"))
             }
-            addAll(currentHistory)
         }
     }
 
     /**
-     * Token-aware history trimming.
+     * 提交状态：按 token 预算裁剪后返回新状态。
+     * 预算 = maxContextTokens − 系统块（system prompt + 记忆）估算，下限 [MIN_TRIM_BUDGET]。
+     */
+    private fun commitTrimmed(state: AgentState): AgentState {
+        val budget = (getMaxContextTokens() - estimateTokens(buildSystemMessages()))
+            .coerceAtLeast(MIN_TRIM_BUDGET)
+        return state.copy(history = trimHistory(state.history, budget))
+    }
+
+    /**
+     * Token-aware history trimming（纯函数，不改入参）。
      * Estimates ~1.3 tokens per CJK character, ~0.25 tokens per ASCII character.
      *
      * Treats assistant(tool_calls) + N×tool(tool_call_id) as atomic blocks so we
      * never leave orphan tool messages that would cause the API to reject the
      * next request with "tool result's tool id(...) not found" (2013).
      */
-    private fun trimHistoryByTokens() {
-        val effectiveMaxTokens = getMaxContextTokens()
-        val estimatedTokens = estimateTokens(history)
-        if (estimatedTokens <= effectiveMaxTokens) {
-            Log.d(TAG, "[trim] skip: estimatedTokens=$estimatedTokens <= effectiveMaxTokens=$effectiveMaxTokens (history.size=${history.size})")
-            return
+    internal fun trimHistory(history: List<Message>, maxTokens: Int): List<Message> {
+        if (estimateTokens(history) <= maxTokens || history.size <= 2) {
+            return history
         }
-        if (history.size <= 2) {
-            Log.d(TAG, "[trim] skip: history.size=${history.size} <= 2")
-            return
-        }
-        Log.d(TAG, "[trim] triggered: estimatedTokens=$estimatedTokens > effectiveMaxTokens=$effectiveMaxTokens (history.size=${history.size})")
+        Log.d(TAG, "[trim] triggered: estimatedTokens=${estimateTokens(history)} > maxTokens=$maxTokens (history.size=${history.size})")
 
         // 跳过 tool-call 配对块作为原子单位: assistant(tool_calls) + N×tool(tool_call_id)
         // 防止留下 orphan tool 消息导致 API 报 "tool result's tool id not found"
         var trimStart = 0
         while (trimStart < history.size - 2 &&
-               estimateTokens(history.subList(trimStart, history.size)) > effectiveMaxTokens) {
+               estimateTokens(history.subList(trimStart, history.size)) > maxTokens) {
             val msg = history[trimStart]
             if (msg.role == "assistant" && !msg.toolCalls.isNullOrEmpty()) {
                 // 跳过整个 assistant + tools 配对块
-                val toolIds = msg.toolCalls!!.map { it.id }.toSet()
+                val toolIds = msg.toolCalls.orEmpty().map { it.id }.toSet()
                 var next = trimStart + 1
                 while (next < history.size &&
                        history[next].role == "tool" &&
@@ -991,28 +1072,65 @@ Example:
             }
         }
 
-        if (trimStart > 0) {
+        return if (trimStart > 0) {
             Log.d(TAG, "[trim] removing first $trimStart messages (history.size: ${history.size} → ${history.size - trimStart})")
-            history.subList(0, trimStart).clear()
+            history.drop(trimStart)
+        } else {
+            history
         }
     }
 
     /**
-     * Estimate token count: CJK ~1.3 tokens/char, ASCII ~4 chars/token
+     * 修复取消遗留的尾部孤儿 tool 块：若最后一条 assistant(tool_calls) 之后
+     * 存在未执行的 toolCall（中途取消/异常），为其补合成 tool 结果，
+     * 保证下一轮请求的消息配对完整（防 API 2013）。
      */
-    private fun estimateTokens(messages: List<Message>): Int {
-        return messages.sumOf { msg ->
-            val cjkCount = msg.content.count { it.code > 0x7F }
-            val asciiCount = msg.content.length - cjkCount
-            (cjkCount * 1.3 + asciiCount * 0.25).toInt()
+    internal fun repairTrailingToolBlock(history: List<Message>): List<Message> {
+        val lastCallIdx = history.indexOfLast { it.role == "assistant" && !it.toolCalls.isNullOrEmpty() }
+        if (lastCallIdx == -1) return history
+        val toolCalls = history[lastCallIdx].toolCalls.orEmpty()
+        // 只修复尾部块：该 assistant 消息之后应当只有 tool 消息
+        val tail = history.subList(lastCallIdx + 1, history.size)
+        if (tail.any { it.role != "tool" }) return history
+        val executed = tail.mapNotNull { it.toolCallId }.toSet()
+        val missing = toolCalls.filter { it.id !in executed }
+        if (missing.isEmpty()) return history
+        Log.w(TAG, "[repair] synthesizing ${missing.size} missing tool result(s) after interrupted turn")
+        return history + missing.map {
+            Message(role = "tool", content = "用户取消了此操作（生成中断）", toolCallId = it.id)
         }
     }
 
-    fun clearHistory() {
-        history.clear()
+    /**
+     * Estimate token count: CJK ~1.3 tokens/char, ASCII ~4 chars/token.
+     * 同时计入 toolCalls 的函数名与参数 —— 工具调用轮次的消息 content 为空但
+     * arguments 可能非常大，只算 content 会显著低估真实上下文占用。
+     */
+    internal fun estimateTokens(messages: List<Message>): Int {
+        return messages.sumOf { msg ->
+            estimateTextTokens(msg.content) +
+                (msg.toolCalls?.sumOf { tc ->
+                    estimateTextTokens(tc.function.name) + estimateTextTokens(tc.function.arguments)
+                } ?: 0)
+        }
     }
 
-    fun getHistory(): List<Message> = history.toList()
+    private fun estimateTextTokens(text: String): Int {
+        val cjkCount = text.count { it.code > 0x7F }
+        val asciiCount = text.length - cjkCount
+        return (cjkCount * 1.3 + asciiCount * 0.25).toInt()
+    }
+
+    fun clearHistory() {
+        // 非挂起 API，无法等待 stateMutex（进行中的一轮可能持锁数十秒）。
+        // currentState 为 @Volatile，直接原子替换。若一轮对话恰好并发收尾，
+        // 其写回会覆盖本次清空 —— 与旧实现 (history.clear()) 的竞争窗口一致，
+        // 实际调用点（新建会话）都在无进行中对话时触发。
+        currentState = AgentState()
+    }
+
+    /** 无锁快照（currentState 为 @Volatile） */
+    fun getHistory(): List<Message> = currentState.history
 
     // ==================== Helpers ====================
 
@@ -1128,6 +1246,27 @@ Example:
             Message(role = "system", content = basePrompt),
             Message(role = "user", content = reflectionPrompt)
         )
+    }
+}
+
+/**
+ * 工具调用循环检测：记录最近 [WINDOW] 次 (toolName, argsHash)，
+ * 同组合出现 ≥ [THRESHOLD] 次判定为循环，强制终止本轮。
+ * （窗口/阈值与 AgentSession.MAX_TOOL_ROUNDS 同源设计，取值见文档）
+ */
+private class ToolLoopDetector {
+    private val recent = ArrayDeque<Pair<String, Int>>()
+
+    fun recordAndCheck(toolName: String, args: String): Boolean {
+        val key = toolName to args.hashCode()
+        recent.addLast(key)
+        if (recent.size > WINDOW) recent.removeFirst()
+        return recent.count { it == key } >= THRESHOLD
+    }
+
+    private companion object {
+        const val WINDOW = 5
+        const val THRESHOLD = 3
     }
 }
 
