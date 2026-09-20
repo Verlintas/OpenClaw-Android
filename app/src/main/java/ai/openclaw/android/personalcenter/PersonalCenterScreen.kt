@@ -29,10 +29,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import ai.openclaw.android.personalcenter.models.CenterItem
 import ai.openclaw.android.personalcenter.models.PriorityLevel
 import ai.openclaw.android.personalcenter.sources.ItemSource
@@ -62,6 +66,20 @@ fun PersonalCenterScreen(
     val calPerm by viewModel.calendarPermissionGranted.collectAsState()
     val smsPerm by viewModel.smsPermissionGranted.collectAsState()
     val callLogPerm by viewModel.callLogPermissionGranted.collectAsState()
+    val notifPerm by viewModel.notificationPermissionGranted.collectAsState()
+    val notifConnected by viewModel.notificationServiceConnected.collectAsState()
+
+    // 用户可能刚从「通知使用权」设置页返回，回到页面时重新判定权限并触发一次拉取
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onScreenResumed()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // 统计
     val notifCount = items.count { it.source == ItemSource.NOTIFICATION }
@@ -109,20 +127,16 @@ fun PersonalCenterScreen(
             calCount = calCount,
             smsCount = smsCount,
             callLogCount = callLogCount,
+            notifReady = notifPerm && notifConnected,
             calPermGranted = calPerm,
             smsPermGranted = smsPerm,
             callLogPermGranted = callLogPerm,
             onStatClick = { source ->
                 expandedSections[source] = !(expandedSections[source] ?: false)
             },
-            onGrantCalendarPerm = {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                context.startActivity(intent)
-            },
-            onGrantSmsPerm = {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                context.startActivity(intent)
-            },
+            onGrantNotificationPerm = { openNotificationListenerSettings(context) },
+            onGrantCalendarPerm = { openAppDetailsSettings(context) },
+            onGrantSmsPerm = { openAppDetailsSettings(context) },
             onGrantCallLogPerm = {
                 viewModel.checkAndRequestCallLogPermission()
             }
@@ -132,7 +146,28 @@ fun PersonalCenterScreen(
         if (isLoading && items.isEmpty()) {
             LoadingState()
         } else if (items.isEmpty()) {
-            EmptyState()
+            // 未授予通知使用权是最常见的空列表原因，单独提示而不是笼统的「暂无内容」
+            if (!notifPerm) {
+                NotificationPermissionEmptyState(
+                    title = "尚未开启通知使用权",
+                    message = "开启后，其他应用的通知会汇总到这里。" +
+                        "请在设置页找到 OpenClaw 并打开「通知使用权」。",
+                    actionText = "前往开启",
+                    onGrant = { openNotificationListenerSettings(context) }
+                )
+            } else if (!notifConnected) {
+                // 权限已开但服务没起来 —— 荣耀等 ROM 的调度策略（iaware）会拦截服务绑定，
+                // 走设置页重新开关一次即可恢复
+                NotificationPermissionEmptyState(
+                    title = "通知服务未运行",
+                    message = "已开启通知使用权，但监听服务尚未启动。" +
+                        "请到设置页把 OpenClaw 的开关关闭，再重新打开一次。",
+                    actionText = "前往设置",
+                    onGrant = { openNotificationListenerSettings(context) }
+                )
+            } else {
+                EmptyState()
+            }
         } else {
             CenterItemList(
                 urgentItems = urgentItems,
@@ -223,10 +258,12 @@ fun CompactStatsRow(
     calCount: Int,
     smsCount: Int,
     callLogCount: Int,
+    notifReady: Boolean,
     calPermGranted: Boolean,
     smsPermGranted: Boolean,
     callLogPermGranted: Boolean,
     onStatClick: (ItemSource) -> Unit,
+    onGrantNotificationPerm: () -> Unit,
     onGrantCalendarPerm: () -> Unit,
     onGrantSmsPerm: () -> Unit,
     onGrantCallLogPerm: () -> Unit
@@ -242,11 +279,15 @@ fun CompactStatsRow(
             emoji = "🔔",
             label = "通知",
             count = notifCount,
-            tint = SciFiPrimary,
-            onClick = { onStatClick(ItemSource.NOTIFICATION) }
+            tint = if (notifReady) SciFiPrimary else Color(0xFFFF9800),
+            onClick = { onStatClick(ItemSource.NOTIFICATION) },
+            denied = !notifReady,
+            onDeniedClick = onGrantNotificationPerm
         )
 
-        HorizontalDivider(
+        // 这里要的是「竖向」分隔条。原来用 HorizontalDivider 是错的：它内部会
+        // fillMaxWidth()，在 Row 里吃掉全部剩余宽度，把后面的统计项压成 0 宽而「消失」。
+        VerticalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -261,7 +302,9 @@ fun CompactStatsRow(
             onDeniedClick = onGrantCalendarPerm
         )
 
-        HorizontalDivider(
+        // 这里要的是「竖向」分隔条。原来用 HorizontalDivider 是错的：它内部会
+        // fillMaxWidth()，在 Row 里吃掉全部剩余宽度，把后面的统计项压成 0 宽而「消失」。
+        VerticalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -276,7 +319,9 @@ fun CompactStatsRow(
             onDeniedClick = onGrantSmsPerm
         )
 
-        HorizontalDivider(
+        // 这里要的是「竖向」分隔条。原来用 HorizontalDivider 是错的：它内部会
+        // fillMaxWidth()，在 Row 里吃掉全部剩余宽度，把后面的统计项压成 0 宽而「消失」。
+        VerticalDivider(
             modifier = Modifier.height(16.dp),
             color = SciFiOutlineVariant.copy(alpha = 0.3f)
         )
@@ -873,6 +918,89 @@ fun LoadingState() {
             CircularProgressIndicator(color = SciFiPrimary)
             Spacer(modifier = Modifier.height(16.dp))
             Text("正在加载...", color = SciFiOnSurfaceVariant)
+        }
+    }
+}
+
+/**
+ * 打开系统的「通知使用权」设置页
+ * NotificationListenerService 的权限是特殊权限，没有运行时申请 API，只能跳转设置页。
+ * 部分 ROM 缺少 ACTION_NOTIFICATION_LISTENER_SETTINGS 的接收方，降级到应用详情页。
+ */
+private fun openNotificationListenerSettings(context: android.content.Context) {
+    val primary = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+    val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+        data = "package:${context.packageName}".toUri()
+    }
+    try {
+        context.startActivity(primary)
+    } catch (e: Exception) {
+        Log.w("PersonalCenter", "Cannot open listener settings, fallback: ${e.message}")
+        try {
+            context.startActivity(fallback)
+        } catch (e2: Exception) {
+            Log.e("PersonalCenter", "Cannot open app details settings: ${e2.message}")
+        }
+    }
+}
+
+/**
+ * 打开本应用详情页 — 日历/短信这类运行时权限没有直达的设置页 Action，
+ * 只能让用户进应用详情，再自己点进「权限」。
+ * （原来这里误用了 ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION，跳的是「所有文件访问权限」）
+ */
+private fun openAppDetailsSettings(context: android.content.Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = "package:${context.packageName}".toUri()
+            }
+        )
+    } catch (e: Exception) {
+        Log.e("PersonalCenter", "Cannot open app details settings: ${e.message}")
+    }
+}
+
+/**
+ * 空状态 — 通知不可用（未授权 / 已授权但服务未运行）
+ */
+@Composable
+fun NotificationPermissionEmptyState(
+    title: String,
+    message: String,
+    actionText: String,
+    onGrant: () -> Unit
+) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.NotificationsOff,
+                contentDescription = null,
+                modifier = Modifier.size(64.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+            Spacer(modifier = Modifier.height(20.dp))
+            Button(onClick = onGrant) {
+                Text(actionText)
+            }
         }
     }
 }

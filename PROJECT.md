@@ -229,11 +229,15 @@ AppDatabase → TfLiteEmbeddingService → MemoryManager
 
 ### 4.4 SmartNotificationListener
 
-**功能**: 监听、分类（URGENT/IMPORTANT/NOISE）和存储通知
+**功能**: 监听、分类（URGENT/IMPORTANT/NOISE）通知
 
 - **ML 分类**: `NotificationMLClassifier`（当前返回 null，回退到规则引擎）
-- **通知屏幕**: Compose UI 列表展示
 - **计划**: 集成 TFLite 分类模型
+- **⚠️ 无持久化**：通知仅存在于 companion 的内存 `StateFlow`（`SmartNotificationListener.notifications`），进程重启即丢失历史。「存储」是长期待办，需接 Room
+- **两个独立状态，不可互相推导**：
+  - `isNotificationListenerEnabled(context)` — 读 `Settings.Secure.enabled_notification_listeners`，即**权限是否授予**
+  - `isConnected` StateFlow — **服务是否真被系统绑定**。荣耀 / MagicOS 的 `iaware` 会拦截绑定，出现「权限为真但服务没起来」
+- **消费方**：个人中心（`personalcenter/`）的 `NotificationSource`。`notification/NotificationScreen.kt` 目前是**死代码**（仅被 import，从未组合调用）
 
 ---
 

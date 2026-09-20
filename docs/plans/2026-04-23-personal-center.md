@@ -152,6 +152,55 @@ ViewModel
 | 新建 | `personalcenter/ImportanceCalculator.kt` | 重要度计算 |
 | 修改 | `MainActivity.kt` | Tab 1 替换 |
 | 修改 | `AndroidManifest.xml` | 新增权限声明 |
+
+---
+
+## 后续修订（2026-09-20）
+
+本节记录原始设计在落地后暴露的问题与修正，供后续维护参考。均在荣耀 DNP-AN00 真机验证。
+
+### 1. 四个数据源必须「订阅即拉取」
+
+原架构图里 `NotificationSource` 标注为「已有 StateFlow」，落地后实现成纯被动的
+`flow { SmartNotificationListener.notifications.collect { ... } }` —— 只镜像内存 StateFlow，不主动查询系统。
+结果它是四源中**唯一无法自愈**的：权限补授后重新进页面，SMS / 日历 / 通话（都是
+`callbackFlow + trySend(fetch())`）能恢复，通知不能。
+
+修正：`NotificationSource.observe()` 同样改为 `callbackFlow`，订阅时先
+`SmartNotificationListener.refreshFromSystem()`。
+
+### 2. 权限状态不能从数据源 Flow 的 `.catch` 推导
+
+设计里没写清这点，落地时写成了：
+
+```kotlin
+calendarSource.observe().catch { e -> _calendarPermissionGranted.value = false; emit(emptyList()) }
+```
+
+但 `CalendarSource` / `SmsSource` 内部已把 `SecurityException` 吞掉并返回 `emptyList()`，
+异常不会传播 → `.catch` 永不触发 → 这两个 flag 一直是初值 `true` → **未授权状态在 UI 上不可达**，
+对应的去授权入口成了死代码。
+
+修正：用 `ContextCompat.checkSelfPermission()` 真实检测（见
+`PersonalCenterViewModel.checkCalendarAndSmsPermissionStatus()`），并在 init / `onScreenResumed` /
+`refresh()` / 60s 轮询里都刷新一次。
+
+### 3. 通知监听权限是「特殊权限」，且有两个独立状态
+
+- 没有运行时申请 API，只能跳设置页：`ACTION_NOTIFICATION_LISTENER_SETTINGS`
+  （ROM 无接收方时降级 `ACTION_APPLICATION_DETAILS_SETTINGS`）。
+- **权限已授予 ≠ 服务已绑定**。`isNotificationListenerEnabled()` 读的是
+  `Settings.Secure.enabled_notification_listeners`，而服务绑定由系统决定。荣耀的 `iaware` 会拦截
+  绑定（`Service starting has been prevented by iaware or trustsbase`），此时权限为真但服务没起来。
+  必须同时看 `SmartNotificationListener.isConnected`，两者的与才是「通知可用」。
+- iaware 拦截**不是永久失败**：实测 force-stop 后重启，前 3 次 bind 被拦、第 4 次（约 10s 后）成功。
+
+### 4. UI 需显式暴露「不可用」状态
+
+原设计只给了统计数字和列表，没有权限态。补：
+
+- 统计项未授权时 tint 转橙 + 显示 `!`，点击走去授权而非展开分类
+- 列表为空时给出具体原因（未授权 / 服务未运行）+ 去授权按钮，而不是笼统的「暂无内容」
 | 保留 | `notification/*` | 原有通知监听服务保留 |
 
 ## 权限变更

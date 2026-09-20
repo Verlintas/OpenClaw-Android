@@ -41,15 +41,19 @@ class SmartNotificationListener : NotificationListenerService() {
         @Volatile private var instance: SmartNotificationListener? = null
         
         // 监听器是否已连接（getActiveNotifications() 只在连接后有效）
-        @Volatile private var isConnected = false
-        
+        // 用 StateFlow 而非普通字段：UI 需要「已授权但服务未绑定」能实时反映出来。
+        // 荣耀等 ROM 的 iaware 会拦截服务绑定，此时权限为真但服务根本没起来，
+        // 只看 enabled_notification_listeners 会误判成「一切正常」。
+        private val _isConnected = MutableStateFlow(false)
+        val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
         /**
          * 获取服务实例（供 ActionExecutor 等外部调用系统 API）
          * 返回 null 表示服务未运行或尚未连接
          */
         fun getInstanceForReply(): SmartNotificationListener? {
             val svc = instance ?: return null
-            if (!isConnected) return null
+            if (!_isConnected.value) return null
             return svc
         }
 
@@ -77,7 +81,7 @@ class SmartNotificationListener : NotificationListenerService() {
             
             // 如果监听器还没连接，getActiveNotifications() 会返回空
             // 此时回退到内存 StateFlow（由 onNotificationPosted 填充）
-            if (!isConnected) {
+            if (!_isConnected.value) {
                 Log.d(TAG, "getActiveNotificationsList: not connected yet, falling back to StateFlow")
                 return _notifications.value
             }
@@ -103,6 +107,31 @@ class SmartNotificationListener : NotificationListenerService() {
         }
 
         /**
+         * 并发守卫：loadActiveNotifications 在状态栏为空时会重试 6 次（累计约 30s），
+         * 而本方法会被 UI 进入页面 / 手动刷新 / 60s 兜底轮询反复调用，
+         * 没有守卫会叠加出多个重试链。
+         */
+        @Volatile private var fetchInFlight = false
+
+        /**
+         * 检查「通知使用权」是否已授予
+         * 读 Settings.Secure.enabled_notification_listeners，格式 pkg/Component:pkg2/Component2
+         */
+        fun isNotificationListenerEnabled(context: Context): Boolean {
+            return try {
+                val flat = android.provider.Settings.Secure.getString(
+                    context.contentResolver,
+                    "enabled_notification_listeners"
+                ) ?: return false
+                val pkg = context.packageName
+                flat.split(":").any { it.startsWith("$pkg/") || it == pkg }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to check listener permission: ${e.message}")
+                false
+            }
+        }
+
+        /**
          * 从系统通知栏主动拉取当前所有通知（异步，更新 StateFlow）
          * 用于：1) 启动时初始加载  2) 内存列表为空时的兜底查询
          */
@@ -111,8 +140,17 @@ class SmartNotificationListener : NotificationListenerService() {
                 Log.w(TAG, "fetchActiveNotifications: service not available")
                 return
             }
+            if (fetchInFlight) {
+                Log.d(TAG, "fetchActiveNotifications: already in flight, skip")
+                return
+            }
+            fetchInFlight = true
             companionScope.launch {
-                svc.loadActiveNotifications()
+                try {
+                    svc.loadActiveNotifications()
+                } finally {
+                    fetchInFlight = false
+                }
             }
         }
 
@@ -175,7 +213,7 @@ class SmartNotificationListener : NotificationListenerService() {
     
     override fun onListenerConnected() {
         super.onListenerConnected()
-        isConnected = true
+        _isConnected.value = true
         Log.d(TAG, "Notification listener connected")
         
         // 检查通知监听权限是否授予
@@ -191,9 +229,9 @@ class SmartNotificationListener : NotificationListenerService() {
         }
         
         // 【1. 启动时主动拉取】获取当前状态栏所有通知
-        // 延迟 5 秒等待系统同步完成
+        // 不再硬编码 delay(5000)：系统若还没同步完，loadActiveNotifications 的空结果重试链
+        // 本来就能覆盖；而同步已完成时可以直接省掉这 5 秒，首屏出数据更快。
         scope.launch {
-            delay(5000)
             Log.d(TAG, "Calling getActiveNotifications()...")
             loadActiveNotifications()
         }
@@ -202,7 +240,7 @@ class SmartNotificationListener : NotificationListenerService() {
     
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        isConnected = false
+        _isConnected.value = false
         Log.d(TAG, "Notification listener disconnected")
     }
     
@@ -262,8 +300,9 @@ class SmartNotificationListener : NotificationListenerService() {
                     delay(delayMs)
                     loadActiveNotifications(retryCount + 1)
                 } else {
-                    Log.e(TAG, "Failed to get notifications after 6 retries (12s total)")
-                    _notifications.value = emptyList()
+                    // 不要用 emptyList() 覆盖：状态栏被用户清空时 onNotificationRemoved 会逐条移除，
+                    // 在这里整体清空会误杀仍有效的历史条目（例如系统尚未同步完成的场景）。
+                    Log.e(TAG, "Failed to get notifications after 6 retries; keeping ${_notifications.value.size} existing items")
                 }
                 return
             }

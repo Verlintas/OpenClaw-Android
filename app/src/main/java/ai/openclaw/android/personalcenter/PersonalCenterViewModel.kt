@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import ai.openclaw.android.GatewayContract
 import ai.openclaw.android.permission.PermissionManager
+import ai.openclaw.android.notification.SmartNotificationListener
 import ai.openclaw.android.personalcenter.models.CenterItem
 import ai.openclaw.android.personalcenter.sources.CalendarSource
 import ai.openclaw.android.personalcenter.sources.CallLogSource
@@ -58,6 +59,14 @@ class PersonalCenterViewModel(
 
     private val _callLogPermissionGranted = MutableStateFlow(false)
     val callLogPermissionGranted: StateFlow<Boolean> = _callLogPermissionGranted.asStateFlow()
+
+    // 通知使用权（NotificationListenerService）— 不是运行时权限，只能在系统设置里开关
+    private val _notificationPermissionGranted = MutableStateFlow(false)
+    val notificationPermissionGranted: StateFlow<Boolean> = _notificationPermissionGranted.asStateFlow()
+
+    // 监听服务是否真的被系统绑定。权限已开但服务没起来的情况在国产 ROM 上很常见
+    // （荣耀 iaware 会拦截绑定），只看权限开关会把这种状态误判成「一切正常」
+    val notificationServiceConnected: StateFlow<Boolean> = SmartNotificationListener.isConnected
 
     // 过滤统计（用于调试）— 使用 @Volatile 保证线程安全（Flow 在不同线程执行）
     @Volatile
@@ -111,6 +120,45 @@ class PersonalCenterViewModel(
         startPeriodicRefresh()
         // 启动时检查权限状态，不自动触发弹框（由 UI 层首次可见时触发）
         checkCallLogPermissionStatus()
+        checkCalendarAndSmsPermissionStatus()
+        checkNotificationPermissionStatus()
+    }
+
+    /**
+     * 重新判定日历 / 短信权限
+     *
+     * 不能依赖数据源 Flow 的 .catch：SmsSource / CalendarSource 内部已经把
+     * SecurityException 吞掉并返回 emptyList，异常根本不会传播到 startMerging 的 catch 块，
+     * 所以这两个 flag 过去一直是初值 true、从未变过 —— 导致「未授权」状态在 UI 上不可达，
+     * 统计行不会显示 ! ，对应的去授权入口也就成了死代码。
+     */
+    private fun checkCalendarAndSmsPermissionStatus() {
+        _calendarPermissionGranted.value = ContextCompat.checkSelfPermission(
+            app, Manifest.permission.READ_CALENDAR
+        ) == PackageManager.PERMISSION_GRANTED
+        _smsPermissionGranted.value = ContextCompat.checkSelfPermission(
+            app, Manifest.permission.READ_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * 重新判定「通知使用权」是否已授予
+     * 这是特殊权限，用户只能在系统设置里开关，因此每次回到页面都要重新读一次
+     */
+    fun checkNotificationPermissionStatus() {
+        _notificationPermissionGranted.value =
+            SmartNotificationListener.isNotificationListenerEnabled(app)
+        Log.d(TAG, "Notification listener permission: ${_notificationPermissionGranted.value}")
+    }
+
+    /**
+     * 页面重新可见时调用（用户可能刚从「通知使用权」设置页返回）
+     * 重新判定权限并触发一次拉取
+     */
+    fun onScreenResumed() {
+        checkCalendarAndSmsPermissionStatus()
+        checkNotificationPermissionStatus()
+        SmartNotificationListener.refreshFromSystem()
     }
 
     /**
@@ -304,16 +352,16 @@ $batchText
 
     /**
      * 每 60 秒兜底刷新（防止 ContentObserver 漏通知）
-     * 各源通过 Flow 自动推送更新，这里触发一次拉取确保数据同步。
+     * 各源通过 Flow 自动推送更新；通知源没有 ContentObserver，这里额外触发一次主动拉取。
      */
     private fun startPeriodicRefresh() {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             while (isActive) {
                 delay(60_000L)
-                Log.d(TAG, "Periodic refresh triggered — Flow will auto-update via ContentObserver")
-                // Flow 基于 ContentObserver 实时更新，这里仅作为兜底日志。
-                // 如需主动拉取（如网络数据源），可在此添加拉取逻辑。
+                checkCalendarAndSmsPermissionStatus()
+                checkNotificationPermissionStatus()
+                SmartNotificationListener.refreshFromSystem()
             }
         }
     }
@@ -324,6 +372,9 @@ $batchText
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
+            checkCalendarAndSmsPermissionStatus()
+            checkNotificationPermissionStatus()
+            SmartNotificationListener.refreshFromSystem()
             delay(500)
             _isLoading.value = false
         }

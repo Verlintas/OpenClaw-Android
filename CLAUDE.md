@@ -80,7 +80,7 @@ User (text + optional images) → ChatScreen → AgentSession (conversation mana
 
 - **`GatewayService`** — Foreground service maintaining Feishu gateway connection.
 
-- **`SmartNotificationListener`** — Notification listener service with ML-based classification.
+- **`SmartNotificationListener`** — Notification listener service with ML-based classification. Exposes two **independent** states: `isNotificationListenerEnabled(context)` (reads `Settings.Secure.enabled_notification_listeners` = permission granted) and `isConnected` StateFlow (service actually bound by the system). On some OEM ROMs (Honor/MagicOS `iaware` blocks the bind) permission reads true while the service never starts — never infer one from the other.
 
 ### Multi-Agent System (`domain/agent/`, `agent/`, `config/`)
 
@@ -175,10 +175,15 @@ Cache-first data layer: high-frequency queries (weather) are refreshed in backgr
 ### Personal Center (`personalcenter/`)
 
 Aggregated priority inbox: merges notifications/calendar/SMS/call-log into one importance-ranked list.
-- **`PersonalCenterScreen`** / **`PersonalCenterViewModel`** — UI + aggregation pipeline: collect 4 sources → keyword filter (LLM semantic filter when available) → cross-source dedup → importance ranking → timed fallback refresh.
-- **Sources** (`sources/`) — `ItemSource` enum (NOTIFICATION/CALENDAR/SMS/CALL_LOG, icon + label + package-name inference); `NotificationSource`, `CalendarSource`, `SmsSource`, `CallLogSource` expose `Flow<List<CenterItem>>` via `callbackFlow` (requires respective runtime permissions).
+- **`PersonalCenterScreen`** / **`PersonalCenterViewModel`** — UI + aggregation pipeline: collect 4 sources → keyword filter (LLM semantic filter when available) → cross-source dedup → importance ranking → timed fallback refresh (60s poll re-reads permissions *and* re-fetches notifications).
+- **Sources** (`sources/`) — `ItemSource` enum (NOTIFICATION/CALENDAR/SMS/CALL_LOG, icon + label + package-name inference); `NotificationSource`, `CalendarSource`, `SmsSource`, `CallLogSource` expose `Flow<List<CenterItem>>` via `callbackFlow` (requires respective runtime permissions). All four must **fetch on subscribe** (`trySend(fetch())`) — a purely passive `flow { collect }` cannot self-heal after a permission is granted later.
 - **`CenterItem`** — unified model: importance 0.0~1.0, `dedupKey`, `mergedCount`, `priorityLevel` (urgent/today/reference), `actionType` (reply/act/info), `expiryTimestamp`.
 - **Filters & scoring** — `ContentFilter` (keyword blacklist/whitelist), `SmartFilter` (LLM value judgment, callback-injected LLM, 1h per-source+title cache), `DeduplicationEngine` (cross-source merge), `ImportanceCalculator` (`baseScore × recencyWeight`), `PriorityClassifier` (LLM batch classification with rule-based fallback).
+- **Permission state — two gotchas:**
+  1. **Never derive permission flags from the source Flow's `.catch`.** `CalendarSource` / `SmsSource` swallow `SecurityException` internally and return `emptyList()`, so the exception never propagates and the flag keeps its initial value forever. Detect with `ContextCompat.checkSelfPermission()` — see `checkCalendarAndSmsPermissionStatus()`.
+  2. **Notification listener permission is not a runtime permission.** There is no request API — the user must toggle it in Settings. Open via `Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS`, falling back to `ACTION_APPLICATION_DETAILS_SETTINGS` when the ROM has no receiver. Calendar/SMS have no direct settings action either — jump to app details and let the user open 「权限」.
+- **UI permission affordances** — each stat chip shows an amber `!` + switches its tint when its source is unavailable (`denied`); tapping then goes to the grant path instead of expanding the section. `notifReady = isNotificationListenerEnabled && isConnected` — a granted-but-unbound listener must also count as unavailable. Empty list shows a specific hint (permission not granted / service not running) instead of a generic "暂无内容".
+- **No persistence** — notifications live only in `SmartNotificationListener`'s in-memory StateFlow; process restart loses history.
 
 ### Dependency Injection (`di/`)
 
