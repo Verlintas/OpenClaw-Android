@@ -104,3 +104,6 @@ sc/
 # Superpowers workflow
 .superpowers/
 graphify-out/
+
+# WorkBuddy workspace data (screenshots, logs, memory)
+.workbuddy/
