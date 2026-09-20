@@ -18,11 +18,16 @@ import ai.openclaw.android.domain.ResponseRouter
 import ai.openclaw.android.domain.session.HybridSessionManager
 import ai.openclaw.android.model.*
 import ai.openclaw.android.permission.PermissionManager
+import ai.openclaw.android.skill.ApprovalDecision
 import ai.openclaw.android.skill.SkillManager
 import ai.openclaw.android.skill.SkillParam
+import ai.openclaw.android.skill.ToolExecutionOutcome
+import ai.openclaw.android.skill.ToolRiskLevel
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -117,6 +122,11 @@ class AgentSession(
 
         /** 运行时权限弹窗等待上限（超时按未授权处理，防止会话永久挂起） */
         private const val PERMISSION_REQUEST_TIMEOUT_MS = 60_000L
+        /**
+         * 工具审批等待上限（A3 修订：审批不可达时挂起等待用户回来决策，而非自动批准/秒拒）。
+         * 10 分钟内未决策 → 视为取消；DANGEROUS 工具绝不因超时放行。
+         */
+        private const val APPROVAL_REQUEST_TIMEOUT_MS = 10 * 60_000L
         /** trim 预算下限，避免系统 prompt 过长时把预算压成负数 */
         private const val MIN_TRIM_BUDGET = 1000
 
@@ -419,6 +429,59 @@ Example:
     private val toolExecutionMutex = Mutex()
     private var accessibilityTools: List<Tool> = emptyList()
 
+    // ==================== Tool Approval（方案 3 统一安全层） ====================
+
+    /** 进行中的审批请求：requestId → 等待用户决策的 deferred（synchronized 保护，临界区内无挂起） */
+    private val pendingToolApprovals = LinkedHashMap<String, CompletableDeferred<ApprovalDecision?>>()
+
+    /**
+     * UI 层响应用户审批决策（确认卡按钮 → ChatViewModel → GatewayContract → 此处）。
+     * requestId 不属于本会话时为 no-op。
+     */
+    fun respondToToolApproval(requestId: String, decision: ApprovalDecision?) {
+        val deferred = synchronized(pendingToolApprovals) { pendingToolApprovals.remove(requestId) }
+        deferred?.complete(decision)
+    }
+
+    /**
+     * 发出 [SessionEvent.ToolApprovalRequest] 并挂起等待用户决策。
+     * 超时 / 无响应 → null（视为取消，绝不放行 —— A3 修订语义）。
+     */
+    private suspend fun requestToolApproval(
+        toolId: String,
+        description: String,
+        risk: ToolRiskLevel,
+        emitEvent: suspend (SessionEvent) -> Unit
+    ): ApprovalDecision? {
+        val requestId = java.util.UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<ApprovalDecision?>()
+        synchronized(pendingToolApprovals) { pendingToolApprovals[requestId] = deferred }
+        try {
+            emitEvent(SessionEvent.ToolApprovalRequest(requestId, toolId, description, risk))
+            return withTimeoutOrNull(APPROVAL_REQUEST_TIMEOUT_MS) { deferred.await() }
+        } finally {
+            synchronized(pendingToolApprovals) { pendingToolApprovals.remove(requestId) }
+        }
+    }
+
+    /**
+     * 运行时权限请求（系统弹窗，限时防挂起）。无 PermissionManager 时直接失败。
+     */
+    private suspend fun requestSkillPermissions(
+        skillId: String,
+        skillName: String,
+        missing: List<String>
+    ): Boolean {
+        val permMgr = permissionManager ?: return false
+        val displayName = PermissionManager.getSkillDisplayName(skillId)
+            .takeIf { it != skillId } ?: skillName
+        return withTimeoutOrNull(PERMISSION_REQUEST_TIMEOUT_MS) {
+            withContext(Dispatchers.Main) {
+                permMgr.requestPermission(missing.toTypedArray(), skillId, displayName)
+            }
+        } ?: false
+    }
+
     // System prompt — loaded from external file, not hardcoded
     private var systemPrompt: String = ""
 
@@ -708,7 +771,8 @@ Example:
         state: AgentState,
         detector: ToolLoopDetector,
         onBefore: suspend (String) -> Unit = {},
-        onResult: suspend (String, String) -> Unit = { _, _ -> }
+        onResult: suspend (String, String) -> Unit = { _, _ -> },
+        emitEvent: (suspend (SessionEvent) -> Unit)? = null
     ): Pair<AgentState, String?> {
         val toolCalls = state.currentToolCalls ?: return state to null
         var history = state.history
@@ -722,7 +786,7 @@ Example:
                 "已终止：同一工具以相同参数重复调用达到上限"
             } else {
                 Log.d(TAG, "[Tool] Executing $toolName, args: ${toolCall.function.arguments}")
-                val r = executeToolCall(toolCall)
+                val r = executeToolCall(toolCall, emitEvent)
                 Log.d(TAG, "[Tool] $toolName → ${r.take(100)}")
                 r
             }
@@ -773,7 +837,10 @@ Example:
      * 整轮在 stateMutex 内推进；取消/异常经 finally + NonCancellable 写回
      * 已达状态（修复孤儿 tool 块），不回滚。
      */
-    fun handleMessageStream(userMessage: String, images: List<ImageContent>? = null): Flow<SessionEvent> = flow {
+    fun handleMessageStream(userMessage: String, images: List<ImageContent>? = null): Flow<SessionEvent> = channelFlow {
+        // channelFlow 而非 flow：工具执行在 executeToolCall 的 withContext(IO) 内，
+        // 审批事件（ToolApprovalRequest）会从 IO 协程回调 send —— 冷流 emit 跨协程
+        // 会违反 Flow 不变式，channelFlow 的 send 跨协程安全。
         refreshMemoryContext()
         persistMessage("user", userMessage)
         val activeTools = tools.takeIf { it.isNotEmpty() }
@@ -803,11 +870,11 @@ Example:
                         when (event) {
                             is ChatEvent.Token -> {
                                 fullText.append(event.text)
-                                emit(SessionEvent.Token(event.text))
+                                send(SessionEvent.Token(event.text))
                             }
                             is ChatEvent.Complete -> completeResponse = event.response
                             is ChatEvent.Error -> {
-                                emit(SessionEvent.Error(event.message))
+                                send(SessionEvent.Error(event.message))
                                 errorText = event.message
                             }
                             is ChatEvent.ToolCallRequested -> {}
@@ -845,7 +912,7 @@ Example:
 
                         Log.d(TAG, "[State] Final answer → ${s.dump()}")
 
-                        content = applyReflection(s, content) { event -> emit(event) }
+                        content = applyReflection(s, content) { event -> send(event) }
                         s = s.copy(
                             history = s.history.dropLast(1) + Message(role = "assistant", content = content),
                             finalContent = content,
@@ -865,8 +932,9 @@ Example:
 
                     val (next, loopMsg) = executeToolsWithLoopGuard(
                         s, detector,
-                        onBefore = { name -> emit(SessionEvent.ToolExecuting(name)) },
-                        onResult = { name, result -> emit(SessionEvent.ToolResult(name, result)) }
+                        onBefore = { name -> send(SessionEvent.ToolExecuting(name)) },
+                        onResult = { name, result -> send(SessionEvent.ToolResult(name, result)) },
+                        emitEvent = { event -> send(event) }
                     )
                     s = next
                     state = s // 同步快照：工具轮完成后
@@ -879,11 +947,11 @@ Example:
 
                 if (pendingComplete != null) {
                     persistMessage("assistant", pendingComplete)
-                    emit(SessionEvent.Complete(pendingComplete))
+                    send(SessionEvent.Complete(pendingComplete))
                 } else if (errorText != null) {
-                    emit(SessionEvent.Error(errorText!!))
+                    send(SessionEvent.Error(errorText!!))
                 } else {
-                    emit(SessionEvent.Error("Exceeded max tool rounds. Last state: ${s.dump()}"))
+                    send(SessionEvent.Error("Exceeded max tool rounds. Last state: ${s.dump()}"))
                 }
                 currentState = commitTrimmed(s)
                 committed = true
@@ -940,7 +1008,17 @@ Example:
 
     // ==================== Tool Execution ====================
 
-    private suspend fun executeToolCall(toolCall: ToolCall): String {
+    /**
+     * 执行单个工具调用。
+     *
+     * Skill 工具走 [SkillManager.executeTool] 统一安全层（权限门 + 风险分级审查 + 审批）；
+     * [emitEvent] 非空（stream 路径）时审批请求经 [SessionEvent.ToolApprovalRequest] 冒泡到 UI，
+     * 为 null（sync 路径，无事件通道）时需要审批的工具直接返回引导文本，不挂起等待。
+     */
+    private suspend fun executeToolCall(
+        toolCall: ToolCall,
+        emitEvent: (suspend (SessionEvent) -> Unit)? = null
+    ): String {
         toolExecutionMutex.lock()
         return try {
             withContext(Dispatchers.IO) {
@@ -949,44 +1027,42 @@ Example:
                 // Check if this is an accessibility tool first
                 val isAccessibilityTool = accessibilityTools.any { it.function.name == toolName }
                 if (!isAccessibilityTool && toolName.contains("_") && toolName.split("_").size >= 2) {
-                    // Skill tool — find matching skill by longest prefix
+                    // Skill tool — 统一安全层入口
                     val params = parseToolCallParams(toolCall)
-                    val skillId = skillManager.getLoadedSkills().keys
-                        .filter { toolName.startsWith("${it}_") }
-                        .maxByOrNull { it.length }
-                        ?: toolName.substringBefore('_')
 
-                    val permCheck = skillManager.checkSkillPermissions(skillId)
-                    if (!permCheck.first) {
-                        // Try runtime permission request
-                        val permMgr = permissionManager
-                        if (permMgr != null) {
-                            val requiredPerms = PermissionManager.getPermissionsForSkill(skillId)
-                                ?: emptyArray()
-                            val displayName = PermissionManager.getSkillDisplayName(skillId)
-                            // 授权等待限时：超时按未授权处理，防止整轮会话因弹窗无人响应而永久挂起
-                            val granted = withTimeoutOrNull(PERMISSION_REQUEST_TIMEOUT_MS) {
-                                withContext(Dispatchers.Main) {
-                                    permMgr.requestPermission(requiredPerms, skillId, displayName)
-                                }
-                            } ?: false
-                            if (!granted) {
-                                return@withContext "需要权限（授权超时或被拒绝）: ${permCheck.second}。请在设置中授权。"
+                    val outcome = skillManager.executeTool(
+                        toolName, params,
+                        requestApproval = emitEvent?.let { emit ->
+                            { toolId, description, risk ->
+                                requestToolApproval(toolId, description, risk, emit)
                             }
-                        } else {
-                            return@withContext "需要权限: ${permCheck.second}。请在设置中授权。"
-                        }
-                    }
+                        },
+                        requestPermissions = ::requestSkillPermissions
+                    )
 
-                    val skillResult = skillManager.executeTool(toolName, params)
-                    if (skillResult.success) {
-                        Log.d(TAG, "Tool $toolName success: ${skillResult.output}")
-                        skillResult.output
-                    } else {
-                        Log.e(TAG, "Tool $toolName failed: ${skillResult.error}")
-                        // 【Bugly 埋点】
-                        CrashRecord.logAgentSessionError("tool_failed", "tool=$toolName", skillResult.error)
-                        skillResult.error ?: "Skill error"
+                    when (outcome) {
+                        is ToolExecutionOutcome.Done -> {
+                            val r = outcome.result
+                            if (r.success) {
+                                Log.d(TAG, "Tool $toolName success: ${r.output}")
+                                r.output
+                            } else {
+                                Log.e(TAG, "Tool $toolName failed: ${r.error}")
+                                // 【Bugly 埋点】
+                                CrashRecord.logAgentSessionError("tool_failed", "tool=$toolName", r.error)
+                                r.error ?: "Skill error"
+                            }
+                        }
+
+                        is ToolExecutionOutcome.Denied -> {
+                            Log.w(TAG, "Tool $toolName denied: ${outcome.reason}")
+                            outcome.reason
+                        }
+
+                        is ToolExecutionOutcome.NeedsApproval -> {
+                            // 仅 sync 路径（无事件通道）到达：返回引导文本，LLM 据此告知用户
+                            "工具 ${outcome.toolId} 需要用户确认后才能执行，当前入口无法弹出确认，请直接在应用对话中发起。"
+                        }
                     }
                 } else {
                     // Accessibility tool
@@ -1321,4 +1397,14 @@ sealed class SessionEvent {
     data class ReflectionStart(val role: String) : SessionEvent()
     /** Reflection phase completed */
     data class ReflectionComplete(val role: String) : SessionEvent()
+    /**
+     * 工具执行需要用户审批（方案 3 统一安全层）。UI 弹确认卡，
+     * 用户决策经 [AgentSession.respondToToolApproval] 回传；超时未决策视为取消。
+     */
+    data class ToolApprovalRequest(
+        val requestId: String,
+        val toolId: String,
+        val description: String,
+        val risk: ToolRiskLevel
+    ) : SessionEvent()
 }

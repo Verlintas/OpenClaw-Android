@@ -78,6 +78,7 @@ class WeatherSkill : Skill {
     private inner class WeatherTool : SkillTool {
         override val name = "get_weather"
         override val description = "获取指定位置的天气信息。支持中文城市名（如'北京'、'西安'）和英文城市名。"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "location" to SkillParam(
                 type = "string",

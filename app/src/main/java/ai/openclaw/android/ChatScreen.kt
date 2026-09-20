@@ -115,6 +115,9 @@ import ai.openclaw.android.ui.theme.MonospaceAccent
 import ai.openclaw.android.ui.ConfirmRequest
 import ai.openclaw.android.model.ImageContent
 import ai.openclaw.android.model.ImageUtils
+import ai.openclaw.android.agent.SessionEvent
+import ai.openclaw.android.skill.ApprovalDecision
+import ai.openclaw.android.skill.ToolRiskLevel
 import ai.openclaw.android.ui.theme.gradientDivider
 import ai.openclaw.android.ui.theme.neonBorder
 import ai.openclaw.android.ui.theme.sciFiGlow
@@ -271,6 +274,9 @@ fun ChatScreen(
     // ScriptEngine showConfirm 弹窗
     confirmRequest: ConfirmRequest? = null,
     onConfirmResult: (Boolean?) -> Unit = {},
+    // 工具审批确认卡（方案 3 统一安全层：云端/本地两路审批共用）
+    pendingToolApproval: SessionEvent.ToolApprovalRequest? = null,
+    onToolApprovalResult: (ApprovalDecision?) -> Unit = {},
 ) {
     var renderedRichContent by remember { mutableStateOf<Map<String, RichContent>>(emptyMap()) }
 
@@ -823,6 +829,56 @@ fun ChatScreen(
                 dismissButton = {
                     TextButton(onClick = { onConfirmResult(false) }) {
                         Text("取消")
+                    }
+                }
+            )
+        }
+
+        // 工具审批确认卡（云端 SessionEvent 流 / 本地旁路流共用）
+        if (pendingToolApproval != null) {
+            val isDangerous = pendingToolApproval.risk == ToolRiskLevel.DANGEROUS
+            AlertDialog(
+                onDismissRequest = { onToolApprovalResult(null) },
+                title = { Text(if (isDangerous) "⚠️ 高危操作确认" else "工具执行确认") },
+                text = {
+                    Column {
+                        Text("Agent 请求执行工具：")
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            pendingToolApproval.toolId,
+                            style = androidx.compose.ui.text.TextStyle(fontWeight = FontWeight.Bold)
+                        )
+                        if (pendingToolApproval.description.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                pendingToolApproval.description,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            if (isDangerous) "该操作风险较高，每次都需要确认。"
+                            else "允许后将执行此操作。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { onToolApprovalResult(ApprovalDecision.ASK_EVERY_TIME) }) {
+                        Text("允许本次")
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        if (!isDangerous) {
+                            TextButton(onClick = { onToolApprovalResult(ApprovalDecision.ALWAYS_APPROVE) }) {
+                                Text("总是允许")
+                            }
+                        }
+                        TextButton(onClick = { onToolApprovalResult(null) }) {
+                            Text("拒绝")
+                        }
                     }
                 }
             )

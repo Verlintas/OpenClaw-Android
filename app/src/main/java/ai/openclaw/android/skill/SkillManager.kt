@@ -1,5 +1,6 @@
 package ai.openclaw.android.skill
 
+import ai.openclaw.android.security.AuditLogger
 import ai.openclaw.android.skill.builtin.*
 import android.content.Context
 import android.util.Log
@@ -9,6 +10,13 @@ class SkillManager(private val context: Context) {
     private val TAG = "SkillManager"
     private val loadedSkills: MutableMap<String, Skill> = mutableMapOf()
     private val httpClient = OkHttpClient()
+
+    /**
+     * 用户审批偏好（ALWAYS_APPROVE / ALWAYS_DENY 持久化）。
+     * 由宿主（GatewayManager）初始化后注入；null 时审查仍生效，只是不持久化偏好。
+     */
+    @Volatile
+    var preferenceManager: UserPreferenceManager? = null
     
     fun loadBuiltinSkills(context: Context) {
         Log.i(TAG, "Loading built-in skills...")
@@ -70,95 +78,132 @@ class SkillManager(private val context: Context) {
         }
     }
     
-    suspend fun executeTool(fullName: String, params: Map<String, Any>): SkillResult {
+    /**
+     * 统一执行入口（方案 3 安全层）—— 内置与动态技能的同一条路：
+     * 解析 skill/tool → 权限门（[Skill.requiredPermissions] 唯一真源）→
+     * [SecurityReview] 风险审查 → 执行 / 需审批 / 拒绝。
+     *
+     * 云端（AgentSession）与本地（GatewayManager.executeLocalTool）路径都经过这里，
+     * 审查自动覆盖两条路径（A4）；区别只在调用方提供的回调（审批卡 UI / 确认流）。
+     *
+     * @param requestApproval 审批回调：SecurityReview 判定 ASK_USER 时挂起等待用户决策。
+     *   null（无审批通道，如后台触发器/sync 调用）→ 返回 [ToolExecutionOutcome.NeedsApproval]，绝不静默放行。
+     * @param requestPermissions 权限回调：权限缺失时调用（云端弹系统授权框）。
+     *   null → 缺权限直接拒绝。
+     */
+    suspend fun executeTool(
+        fullName: String,
+        params: Map<String, Any>,
+        requestApproval: ToolApprovalRequester? = null,
+        requestPermissions: SkillPermissionRequester? = null
+    ): ToolExecutionOutcome {
         val (skillId, toolName) = parseToolName(fullName, loadedSkills.keys)
         val skill = loadedSkills[skillId]
-        
+
         if (skill == null) {
-            return SkillResult(false, "", "Skill not found: $skillId")
+            return ToolExecutionOutcome.Done(SkillResult(false, "", "Skill not found: $skillId"))
         }
-        
+
         val tool = skill.tools.find { it.name == toolName }
         if (tool == null) {
-            return SkillResult(false, "", "Tool not found: $toolName in skill $skillId")
+            return ToolExecutionOutcome.Done(SkillResult(false, "", "Tool not found: $toolName in skill $skillId"))
         }
-        
-        // 检查技能所需的权限
-        val permissionResult = checkSkillPermissions(skillId)
-        if (!permissionResult.first) {
-            // 权限不足，返回权限请求信息
-            return SkillResult(false, "", "需要权限: ${permissionResult.second}")
+
+        // ---- 权限门（统一行为，A4：消灭本地路径静默失败）----
+        val missing = missingPermissions(skill)
+        if (missing.isNotEmpty()) {
+            val granted = requestPermissions?.invoke(skillId, skill.name, missing) ?: false
+            if (!granted || missingPermissions(skill).isNotEmpty()) {
+                return ToolExecutionOutcome.Denied(
+                    "需要权限: ${missing.joinToString(", ")}。请在设置中授权后重试。"
+                )
+            }
         }
-        
-        return tool.execute(params)
+
+        // ---- 安全审查（风险分级）----
+        val toolId = fullName // namespaced: skillId_toolName
+        val preference = preferenceManager?.getPreference(toolId)
+        val policy = SecurityReview.reviewTool(toolId, tool.riskLevel, preference)
+
+        return when (policy) {
+            ToolSecurityPolicy.AUTO_EXECUTE -> executeWithAudit(toolId, tool, params)
+
+            ToolSecurityPolicy.DENY ->
+                ToolExecutionOutcome.Denied("此操作已被用户拒绝。如需恢复，请在对话中重新发起并确认。")
+
+            ToolSecurityPolicy.ASK_USER -> {
+                val requester = requestApproval
+                    // 无审批通道（后台触发器/sync 调用）→ 不执行，交调用方文本化
+                    ?: return ToolExecutionOutcome.NeedsApproval(toolId, tool.description, tool.riskLevel)
+                val decision = requester(toolId, tool.description, tool.riskLevel)
+                when (decision) {
+                    null -> ToolExecutionOutcome.Denied("用户取消了操作")
+                    ApprovalDecision.ALWAYS_APPROVE -> {
+                        // DANGEROUS 不持久化白名单：审查规则下一次仍会询问
+                        if (tool.riskLevel != ToolRiskLevel.DANGEROUS) {
+                            preferenceManager?.setPreference(toolId, ApprovalDecision.ALWAYS_APPROVE)
+                        }
+                        executeWithAudit(toolId, tool, params)
+                    }
+                    ApprovalDecision.ALWAYS_DENY -> {
+                        preferenceManager?.setPreference(toolId, ApprovalDecision.ALWAYS_DENY)
+                        ToolExecutionOutcome.Denied("用户已拒绝此操作")
+                    }
+                    ApprovalDecision.ASK_EVERY_TIME -> executeWithAudit(toolId, tool, params)
+                }
+            }
+        }
     }
-    
-    /**
-     * 检查技能所需权限
-     * @return Pair<Boolean, String> - 第一个元素表示是否有权限，第二个元素是缺少的权限信息
-     */
-    fun checkSkillPermissions(skillId: String): Pair<Boolean, String> {
-        val permissions = getRequiredPermissionsForSkill(skillId)
-        if (permissions == null) {
-            // 该技能不需要特殊权限
-            return Pair(true, "")
+
+    /** DANGEROUS 工具执行前后各写一条审计（SHA-256 哈希链），其余直接执行 */
+    private suspend fun executeWithAudit(
+        toolId: String,
+        tool: SkillTool,
+        params: Map<String, Any>
+    ): ToolExecutionOutcome {
+        if (tool.riskLevel == ToolRiskLevel.DANGEROUS) {
+            AuditLogger.log("dangerous_tool_start", 0L, "tool=$toolId")
         }
-        
-        val hasPermissions = hasPermissions(context, permissions)
-        if (hasPermissions) {
-            return Pair(true, "")
+        val result = try {
+            tool.execute(params)
+        } catch (e: Exception) {
+            Log.e(TAG, "Tool $toolId threw: ${e.message}")
+            SkillResult(false, "", "工具执行异常: ${e.message}")
         }
-        
-        // 返回缺少的权限列表
-        val missingPermissions = permissions.filter { permission ->
-            androidx.core.content.ContextCompat.checkSelfPermission(context, permission) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (tool.riskLevel == ToolRiskLevel.DANGEROUS) {
+            AuditLogger.log(
+                "dangerous_tool_end", 0L,
+                "tool=$toolId success=${result.success} output=${result.output.take(50)}"
+            )
         }
-        
-        return Pair(false, missingPermissions.joinToString(", "))
-    }
-    
-    /**
-     * 获取技能所需的权限列表
-     */
-    fun getSkillRequiredPermissions(skillId: String): Array<String>? {
-        return getRequiredPermissionsForSkill(skillId)
+        return ToolExecutionOutcome.Done(result)
     }
 
     /**
-     * 根据技能ID获取所需权限（public for PermissionManager）
+     * 检查技能所需权限（读取 [Skill.requiredPermissions]）
+     * @return Pair<Boolean, String> - 第一个元素表示是否有权限，第二个元素是缺少的权限信息
      */
-    fun getRequiredPermissionsForSkill(skillId: String): Array<String>? {
-        return when (skillId) {
-            "calendar" -> arrayOf(
-                android.Manifest.permission.READ_CALENDAR,
-                android.Manifest.permission.WRITE_CALENDAR
-            )
-            "location" -> arrayOf(
-                android.Manifest.permission.ACCESS_FINE_LOCATION,
-                android.Manifest.permission.ACCESS_COARSE_LOCATION
-            )
-            "contact" -> arrayOf(
-                android.Manifest.permission.READ_CONTACTS
-            )
-            "sms" -> arrayOf(
-                android.Manifest.permission.SEND_SMS,
-                android.Manifest.permission.READ_SMS
-            )
-            "camera" -> arrayOf(
-                android.Manifest.permission.CAMERA,
-                android.Manifest.permission.RECORD_AUDIO
-            )
-            else -> null
+    fun checkSkillPermissions(skillId: String): Pair<Boolean, String> {
+        val skill = loadedSkills[skillId]
+        val permissions = skill?.requiredPermissions ?: return Pair(true, "")
+
+        val missing = missingPermissions(skill)
+        return if (missing.isEmpty()) Pair(true, "") else Pair(false, missing.joinToString(", "))
+    }
+
+    private fun missingPermissions(skill: Skill): List<String> {
+        return skill.requiredPermissions.filter { permission ->
+            androidx.core.content.ContextCompat.checkSelfPermission(context, permission) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
         }
     }
-    
+
     /**
-     * 检查是否拥有所有必需的权限
+     * 获取技能声明的权限列表（来自 [Skill.requiredPermissions]，无声明返回 null）
      */
-    private fun hasPermissions(context: Context, permissions: Array<String>): Boolean {
-        return permissions.all { permission ->
-            androidx.core.content.ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        }
+    fun getSkillRequiredPermissions(skillId: String): Array<String>? {
+        val skill = loadedSkills[skillId] ?: return null
+        return skill.requiredPermissions.takeIf { it.isNotEmpty() }?.toTypedArray()
     }
     
     private fun parseToolName(fullName: String, knownSkillIds: Set<String> = emptySet()): Pair<String, String> {

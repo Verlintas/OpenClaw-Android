@@ -20,6 +20,11 @@ class SMSSkill(private val context: Context) : Skill {
     override val description = "读取和发送短信"
     override val version = "1.0.0"
 
+    override val requiredPermissions = listOf(
+        android.Manifest.permission.SEND_SMS,
+        android.Manifest.permission.READ_SMS
+    )
+
     override val instructions = """
 # SMS Skill
 
@@ -38,6 +43,8 @@ class SMSSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "send_sms"
             override val description = "发送短信"
+            // 对外发送不可逆（产生费用/发给真实的人）→ 每次都需用户确认
+            override val riskLevel = ToolRiskLevel.DANGEROUS
             override val parameters = mapOf(
                 "phone_number" to SkillParam("string", "接收方电话号码", true),
                 "message" to SkillParam("string", "短信内容", true)
@@ -69,6 +76,7 @@ class SMSSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "read_sms"
             override val description = "读取最近的短信"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "limit" to SkillParam("number", "读取数量(默认100条)", false, 100),
                 "from" to SkillParam("string", "发件人号码筛选(可选)", false)
@@ -136,6 +144,7 @@ class SMSSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "get_unread_sms"
             override val description = "获取未读短信数量"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = emptyMap<String, SkillParam>()
 
             override suspend fun execute(params: Map<String, Any>): SkillResult {

@@ -58,6 +58,7 @@ class NotifySkill(
         override val name = "list"
         override val description =
             "获取当前活跃的通知列表。需要通知监听权限。"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "limit" to SkillParam(
                 type = "number",

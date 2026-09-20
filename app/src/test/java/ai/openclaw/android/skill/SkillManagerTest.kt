@@ -28,6 +28,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.Assert.*
 import java.io.ByteArrayInputStream
+import java.io.File
 
 class SkillManagerTest {
 
@@ -130,6 +131,7 @@ class SkillManagerTest {
         every { mockSkill.tools } returns listOf(
             mockk<SkillTool>(relaxed = true).also { tool ->
                 every { tool.name } returns "generate_skill"
+                every { tool.riskLevel } returns ToolRiskLevel.READ
                 coEvery { tool.execute(any()) } returns SkillResult(true, "skill registered", "")
             }
         )
@@ -144,15 +146,150 @@ class SkillManagerTest {
         } returns PackageManager.PERMISSION_GRANTED
 
         // Act: call the tool with the underscored skill ID
-        val result = skillManager.executeTool(
+        val outcome = skillManager.executeTool(
             "dynamic_skill_generator_generate_skill",
             mapOf("skillJson" to "{}")
         )
 
-        // Assert: should find the skill, not fail with "Skill not found: dynamic"
+        // Assert: READ 工具直通执行，且不应出现 "Skill not found: dynamic"
+        assertTrue("Expected Done outcome but got $outcome", outcome is ToolExecutionOutcome.Done)
+        val result = (outcome as ToolExecutionOutcome.Done).result
         assertFalse("Should not return 'Skill not found: dynamic' error",
             result.output.contains("Skill not found: dynamic"))
+        assertEquals("skill registered", result.output)
     }
+
+    // ==================== 统一安全层（方案 3）验收 ====================
+
+    /** 注册一个可控风险的 mock 技能，返回其完整工具名 */
+    private fun registerMockSkill(skillId: String, toolName: String, risk: ToolRiskLevel): String {
+        val mockSkill = mockk<Skill>(relaxed = true)
+        every { mockSkill.id } returns skillId
+        every { mockSkill.name } returns "测试技能"
+        every { mockSkill.requiredPermissions } returns emptyList()
+        every { mockSkill.tools } returns listOf(
+            mockk<SkillTool>(relaxed = true).also { tool ->
+                every { tool.name } returns toolName
+                every { tool.riskLevel } returns risk
+                every { tool.description } returns "测试工具"
+                coEvery { tool.execute(any()) } returns SkillResult(true, "executed", "")
+            }
+        )
+        every { mockSkill.initialize(any()) } returns Unit
+        skillManager.registerSkill(mockSkill)
+        return "${skillId}_$toolName"
+    }
+
+    @Test
+    fun `executeTool WRITE without preference and without channel returns NeedsApproval`() = runTest {
+        // 验收 #2：sms_send_sms 场景的抽象——WRITE + 无偏好 + 无审批通道（后台触发器）
+        val toolId = registerMockSkill("sms", "send_sms", ToolRiskLevel.WRITE)
+
+        val outcome = skillManager.executeTool(toolId, emptyMap())
+
+        assertTrue("Expected NeedsApproval but got $outcome", outcome is ToolExecutionOutcome.NeedsApproval)
+        outcome as ToolExecutionOutcome.NeedsApproval
+        assertEquals(toolId, outcome.toolId)
+        assertEquals(ToolRiskLevel.WRITE, outcome.risk)
+    }
+
+    @Test
+    fun `executeTool READ executes directly without approval`() = runTest {
+        val toolId = registerMockSkill("weather", "get_weather", ToolRiskLevel.READ)
+
+        val outcome = skillManager.executeTool(toolId, emptyMap())
+
+        assertTrue(outcome is ToolExecutionOutcome.Done)
+        assertEquals("executed", (outcome as ToolExecutionOutcome.Done).result.output)
+    }
+
+    @Test
+    fun `executeTool WRITE with approval ALWAYS_APPROVE executes and persists preference`() = runTest {
+        val toolId = registerMockSkill("sms", "send_sms", ToolRiskLevel.WRITE)
+        val prefs = UserPreferenceManager(createTempDir())
+        skillManager.preferenceManager = prefs
+
+        val outcome = skillManager.executeTool(toolId, emptyMap(), requestApproval = { _, _, _ -> ApprovalDecision.ALWAYS_APPROVE })
+
+        assertTrue(outcome is ToolExecutionOutcome.Done)
+        assertEquals("executed", (outcome as ToolExecutionOutcome.Done).result.output)
+        // 偏好持久化：下次同工具直通
+        assertEquals(ApprovalDecision.ALWAYS_APPROVE, prefs.getPreference(toolId)?.decision)
+        val second = skillManager.executeTool(toolId, emptyMap())
+        assertTrue("Expected direct execution after ALWAYS_APPROVE but got $second", second is ToolExecutionOutcome.Done)
+    }
+
+    @Test
+    fun `executeTool DANGEROUS with ALWAYS_APPROVE executes but does not persist`() = runTest {
+        // DANGEROUS 不持久化白名单：下次仍会询问（过期白名单定时炸弹防御）
+        val toolId = registerMockSkill("shell", "exec", ToolRiskLevel.DANGEROUS)
+        val prefs = UserPreferenceManager(createTempDir())
+        skillManager.preferenceManager = prefs
+
+        val outcome = skillManager.executeTool(toolId, emptyMap(), requestApproval = { _, _, _ -> ApprovalDecision.ALWAYS_APPROVE })
+
+        assertTrue(outcome is ToolExecutionOutcome.Done)
+        assertNull("DANGEROUS preference must not be persisted", prefs.getPreference(toolId))
+        // 第二次仍然 NeedsApproval（无通道时）
+        val second = skillManager.executeTool(toolId, emptyMap())
+        assertTrue(second is ToolExecutionOutcome.NeedsApproval)
+    }
+
+    @Test
+    fun `executeTool approval cancelled returns Denied`() = runTest {
+        val toolId = registerMockSkill("reminder", "set_reminder", ToolRiskLevel.WRITE)
+
+        val outcome = skillManager.executeTool(toolId, emptyMap(), requestApproval = { _, _, _ -> null })
+
+        assertTrue(outcome is ToolExecutionOutcome.Denied)
+    }
+
+    @Test
+    fun `executeTool missing permissions without requester returns Denied`() = runTest {
+        // A4：本地/后台路径缺权限 → 明确拒绝，不再静默失败
+        val mockSkill = mockk<Skill>(relaxed = true)
+        every { mockSkill.id } returns "calendar"
+        every { mockSkill.name } returns "日历"
+        every { mockSkill.requiredPermissions } returns listOf(Manifest.permission.READ_CALENDAR)
+        every { mockSkill.tools } returns listOf(
+            mockk<SkillTool>(relaxed = true).also { tool ->
+                every { tool.name } returns "list_events"
+                every { tool.riskLevel } returns ToolRiskLevel.READ
+                coEvery { tool.execute(any()) } returns SkillResult(true, "executed", "")
+            }
+        )
+        every { mockSkill.initialize(any()) } returns Unit
+        skillManager.registerSkill(mockSkill)
+
+        mockkStatic(ContextCompat::class)
+        every {
+            ContextCompat.checkSelfPermission(any(), any())
+        } returns PackageManager.PERMISSION_DENIED
+
+        val outcome = skillManager.executeTool("calendar_list_events", emptyMap())
+
+        assertTrue("Expected Denied but got $outcome", outcome is ToolExecutionOutcome.Denied)
+        assertTrue((outcome as ToolExecutionOutcome.Denied).reason.contains("需要权限"))
+    }
+
+    @Test
+    fun `requiredPermissions declared by camera sms location skills are non-empty`() {
+        // 验收 #3：权限唯一真源是 Skill.requiredPermissions（N1 修复）
+        every { mockContext.packageName } returns "ai.openclaw.android.test"
+        skillManager.loadBuiltinSkills(mockContext)
+
+        for (skillId in listOf("camera", "sms", "location", "contact", "calendar")) {
+            val perms = skillManager.getSkillRequiredPermissions(skillId)
+            assertNotNull("Skill '$skillId' should declare requiredPermissions", perms)
+            assertTrue("Skill '$skillId' permissions should be non-empty", perms!!.isNotEmpty())
+        }
+        // weather / search 等纯查询技能不声明权限
+        assertNull(skillManager.getSkillRequiredPermissions("weather"))
+        assertNull(skillManager.getSkillRequiredPermissions("search"))
+    }
+
+    private fun createTempDir(): File =
+        java.nio.file.Files.createTempDirectory("skill_prefs_test").toFile()
 
     @Test
     fun `executeTool_validCall_returnsSuccess`() = runTest {

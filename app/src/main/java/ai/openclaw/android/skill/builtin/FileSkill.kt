@@ -88,6 +88,7 @@ class FileSkill(private val context: Context) : Skill {
     private inner class ReadFileTool : SkillTool {
         override val name = "read_file"
         override val description = "读取文本文件内容"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "path" to SkillParam(
                 type = "string",
@@ -196,6 +197,7 @@ class FileSkill(private val context: Context) : Skill {
     private inner class ListDirTool : SkillTool {
         override val name = "list_dir"
         override val description = "列出目录内容"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "path" to SkillParam(
                 type = "string",

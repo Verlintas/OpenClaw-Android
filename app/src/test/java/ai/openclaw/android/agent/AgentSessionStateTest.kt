@@ -9,8 +9,13 @@ import ai.openclaw.android.model.ResponseMessage
 import ai.openclaw.android.model.ToolCall
 import ai.openclaw.android.model.ToolCallFunction
 import ai.openclaw.android.permission.PermissionManager
+import ai.openclaw.android.skill.ApprovalDecision
+import ai.openclaw.android.skill.Skill
 import ai.openclaw.android.skill.SkillManager
 import ai.openclaw.android.skill.SkillResult
+import ai.openclaw.android.skill.SkillTool
+import ai.openclaw.android.skill.ToolExecutionOutcome
+import ai.openclaw.android.skill.ToolRiskLevel
 import android.util.Log
 import io.mockk.*
 import kotlinx.coroutines.CompletableDeferred
@@ -21,6 +26,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -82,7 +88,8 @@ class AgentSessionStateTest {
         // Skill 路径通用桩
         every { mockSkillManager.getLoadedSkills() } returns mapOf("weather" to mockk(relaxed = true))
         every { mockSkillManager.checkSkillPermissions(any()) } returns Pair(true, "")
-        coEvery { mockSkillManager.executeTool(any(), any()) } returns SkillResult(success = true, output = "ok")
+        coEvery { mockSkillManager.executeTool(any(), any(), any(), any()) } returns
+            ai.openclaw.android.skill.ToolExecutionOutcome.Done(SkillResult(success = true, output = "ok"))
     }
 
     @After
@@ -262,7 +269,7 @@ class AgentSessionStateTest {
 
         assertTrue("reply should mention the loop termination: $reply", reply.contains("重复调用"))
         // 第 3 次同调用触发阈值（≥3），实际只执行前 2 次
-        coVerify(exactly = 2) { mockSkillManager.executeTool(any(), any()) }
+        coVerify(exactly = 2) { mockSkillManager.executeTool(any(), any(), any(), any()) }
 
         // 状态落盘：循环终止消息在历史中，且无孤儿 tool 消息
         val history = session.getHistory()
@@ -276,7 +283,7 @@ class AgentSessionStateTest {
     fun `cancelled stream commits partial state without orphan tool messages`() = runBlocking(Dispatchers.Default) {
         // LLM 返回 2 个 toolCall，工具执行挂起模拟长任务
         fakeModelClient.streamResponder = { toolCallResponse(call("c1"), call("c2")) }
-        coEvery { mockSkillManager.executeTool(any(), any()) } coAnswers { awaitCancellation() }
+        coEvery { mockSkillManager.executeTool(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
 
         val session = createSession()
         val toolExecuting = CompletableDeferred<Unit>()
@@ -313,6 +320,66 @@ class AgentSessionStateTest {
         val history = session.getHistory()
         assertEquals(listOf("user", "assistant"), history.map { it.role })
         assertEquals("你好", history.last().content)
+    }
+
+    // ==================== 工具审批流（方案 3） ====================
+
+    @Test
+    fun `tool approval request bubbles up and response resumes execution`() = runBlocking(Dispatchers.Default) {
+        // 端到端走真实 SkillManager 安全层：WRITE 工具无偏好 → ASK_USER →
+        // 审批事件经 SessionEvent 流冒泡 → respondToToolApproval 回传决策 → 执行恢复。
+        // （不用 mockk 桩 executeTool：coAnswers 会把挂起调用调度到独立协程，
+        //  跨协程 emit 违反冷流不变式，真实链路不存在该跳变。）
+        var round = 0
+        fakeModelClient.streamResponder = { _ ->
+            if (round++ == 0) toolCallResponse(call("c1", name = "approval_send"))
+            else textResponse("已发送")
+        }
+
+        val realSkillManager = SkillManager(mockk(relaxed = true))
+        val approvalSkill = mockk<Skill>(relaxed = true)
+        every { approvalSkill.id } returns "approval"
+        every { approvalSkill.name } returns "审批技能"
+        every { approvalSkill.requiredPermissions } returns emptyList()
+        every { approvalSkill.tools } returns listOf(
+            mockk<SkillTool>(relaxed = true).also { tool ->
+                every { tool.name } returns "send"
+                every { tool.riskLevel } returns ToolRiskLevel.WRITE
+                every { tool.description } returns "发送"
+                coEvery { tool.execute(any()) } returns SkillResult(success = true, output = "sent", error = "")
+            }
+        )
+        every { approvalSkill.initialize(any()) } returns Unit
+        realSkillManager.registerSkill(approvalSkill)
+
+        val session = AgentSession(
+            modelClient = fakeModelClient,
+            skillManager = realSkillManager,
+            permissionManager = mockk(relaxed = true)
+        )
+
+        val approvalEvent = CompletableDeferred<SessionEvent.ToolApprovalRequest>()
+        val completed = CompletableDeferred<String>()
+        val job = launch {
+            session.handleMessageStream("发送").collect { event ->
+                when (event) {
+                    is SessionEvent.ToolApprovalRequest -> approvalEvent.complete(event)
+                    is SessionEvent.Complete -> completed.complete(event.fullText)
+                    else -> Unit
+                }
+            }
+        }
+
+        // 1. 审批请求经 SessionEvent 流冒泡到 UI（流挂起等待决策，不超时）
+        val request = withTimeoutOrNull(10_000) { approvalEvent.await() }
+        assertNotNull("ToolApprovalRequest should bubble up to the collector", request)
+        assertEquals("approval_send", request!!.toolId)
+        assertEquals(ToolRiskLevel.WRITE, request.risk)
+
+        // 2. UI 决策回传 → 挂起中的审批循环恢复 → 工具执行 → 轮次正常完成
+        session.respondToToolApproval(request.requestId, ApprovalDecision.ALWAYS_APPROVE)
+        assertEquals("已发送", withTimeoutOrNull(10_000) { completed.await() })
+        job.join()
     }
 
     // ==================== 并发：sync + streaming 混合入口 ====================

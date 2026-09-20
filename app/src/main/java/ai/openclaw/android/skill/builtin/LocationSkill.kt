@@ -22,6 +22,11 @@ class LocationSkill(private val context: Context) : Skill {
     override val name = "定位"
     override val description = "获取GPS位置和周边地点信息"
     override val version = "2.0.0"
+
+    override val requiredPermissions = listOf(
+        android.Manifest.permission.ACCESS_FINE_LOCATION,
+        android.Manifest.permission.ACCESS_COARSE_LOCATION
+    )
     
     override val instructions = """
 # Location Skill
@@ -46,6 +51,7 @@ class LocationSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "get_location"
             override val description = "获取当前GPS位置"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = emptyMap<String, SkillParam>()
             
             override suspend fun execute(params: Map<String, Any>): SkillResult {
@@ -119,6 +125,7 @@ class LocationSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "get_address"
             override val description = "将GPS坐标转换为地址"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "latitude" to SkillParam("number", "纬度", true),
                 "longitude" to SkillParam("number", "经度", true)
@@ -187,6 +194,7 @@ class LocationSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "search_places"
             override val description = "搜索附近的地点"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "query" to SkillParam("string", "搜索关键词（如 '餐厅'、'加油站'）", true),
                 "latitude" to SkillParam("number", "中心纬度（可选，默认当前位置）", false),

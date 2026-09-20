@@ -2,6 +2,7 @@ package ai.openclaw.android.trigger
 
 import ai.openclaw.android.notification.SmartNotificationListener
 import ai.openclaw.android.skill.SkillManager
+import ai.openclaw.android.skill.ToolExecutionOutcome
 import ai.openclaw.android.trigger.models.*
 import ai.openclaw.android.agent.AgentSession
 import android.app.Notification
@@ -82,6 +83,10 @@ class ActionExecutor(
 
     /**
      * 执行 SkillCall — 调用 Skill 工具
+     *
+     * 走 SkillManager 统一安全层，但不提供审批通道（后台触发器无 UI）：
+     * READ 工具直通；WRITE/DANGEROUS 需审批 → 返回 NeedsApproval，不静默放行。
+     * WRITE 工具若有 ALWAYS_APPROVE 偏好（用户曾在对话中确认）也会直通。
      */
     private suspend fun executeSkillCall(
         action: TriggerAction.SkillCall,
@@ -93,19 +98,32 @@ class ActionExecutor(
             // 解析参数，替换事件变量
             val params = parseAndInterpolateParams(action.paramsJson, event)
 
-            // 调用 SkillManager 执行工具
-            val result = skillManager.executeTool(toolFullName, params)
+            // 调用 SkillManager 执行工具（统一安全层）
+            when (val outcome = skillManager.executeTool(toolFullName, params)) {
+                is ToolExecutionOutcome.Done -> {
+                    val result = outcome.result
+                    if (result.success) {
+                        ActionResult(
+                            success = true,
+                            result = "Skill executed: ${action.toolName} → ${result.output.take(200)}"
+                        )
+                    } else {
+                        ActionResult(
+                            success = false,
+                            error = "Skill failed: ${result.error}"
+                        )
+                    }
+                }
 
-            if (result.success) {
-                ActionResult(
-                    success = true,
-                    result = "Skill executed: ${action.toolName} → ${result.output.take(200)}"
-                )
-            } else {
-                ActionResult(
-                    success = false,
-                    error = "Skill failed: ${result.error}"
-                )
+                is ToolExecutionOutcome.Denied ->
+                    ActionResult(success = false, error = "Skill denied: ${outcome.reason}")
+
+                is ToolExecutionOutcome.NeedsApproval ->
+                    ActionResult(
+                        success = false,
+                        error = "Skill $toolFullName 需要用户确认（后台触发器无确认通道），未执行。" +
+                            "如需放行，请先在对话中对该工具选择「总是允许」。"
+                    )
             }
         } catch (e: Exception) {
             Log.e(TAG, "SkillCall failed: ${e.message}", e)

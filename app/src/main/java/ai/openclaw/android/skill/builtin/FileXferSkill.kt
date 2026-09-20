@@ -98,6 +98,8 @@ class FileXferSkill(
     private inner class ReadTool : SkillTool {
         override val name = "read"
         override val description = "读取设备上的文件内容。支持文本文件和图片。"
+        // file_xfer_* 是跨设备/跨目录传输面（含对外分享），整组列为高危
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val parameters = mapOf(
             "path" to SkillParam(
                 type = "string",
@@ -216,6 +218,7 @@ class FileXferSkill(
 
     private inner class WriteTool : SkillTool {
         override val name = "write"
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val description = "将内容写入设备文件。"
         override val parameters = mapOf(
             "path" to SkillParam(
@@ -295,6 +298,7 @@ class FileXferSkill(
 
     private inner class ListTool : SkillTool {
         override val name = "list"
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val description = "列出目录内容。"
         override val parameters = mapOf(
             "path" to SkillParam(
@@ -362,6 +366,7 @@ class FileXferSkill(
 
     private inner class ShareTool : SkillTool {
         override val name = "share"
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val description = "将文件分享给用户（通过系统分享 Intent 或保存到 Downloads 目录）。"
         override val parameters = mapOf(
             "path" to SkillParam(
@@ -436,6 +441,7 @@ class FileXferSkill(
 
     private inner class DownloadTool : SkillTool {
         override val name = "download"
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val description = "从 URL 下载文件到设备。"
         override val parameters = mapOf(
             "url" to SkillParam(

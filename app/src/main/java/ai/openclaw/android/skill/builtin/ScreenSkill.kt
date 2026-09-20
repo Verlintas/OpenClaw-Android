@@ -58,6 +58,7 @@ class ScreenSkill(
         override val name = "screenshot"
         override val description =
             "截取当前屏幕。优先使用 MediaProjection，失败后尝试 PixelCopy，最终 fallback 到视图树结构化描述。"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "format" to SkillParam(
                 type = "string",
@@ -202,6 +203,7 @@ class ScreenSkill(
         override val name = "read"
         override val description =
             "读取当前屏幕的结构化 UI 信息。返回当前窗口的视图树、焦点元素、可交互元素列表。"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "max_depth" to SkillParam(
                 type = "number",

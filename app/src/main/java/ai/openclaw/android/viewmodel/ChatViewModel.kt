@@ -66,6 +66,51 @@ class ChatViewModel : ViewModel() {
     private val _allSessions = MutableStateFlow<List<SessionEntity>>(emptyList())
     val allSessions: StateFlow<List<SessionEntity>> = _allSessions.asStateFlow()
 
+    // ==================== 工具审批（方案 3 统一安全层） ====================
+
+    /**
+     * 待用户决策的工具审批请求（云端经 SessionEvent 流 / 本地经 GatewayContract 旁路流，
+     * 两条路径共用这一份状态与同一张确认卡）。null = 无待审批。
+     */
+    private val _pendingToolApproval = MutableStateFlow<SessionEvent.ToolApprovalRequest?>(null)
+    val pendingToolApproval: StateFlow<SessionEvent.ToolApprovalRequest?> = _pendingToolApproval.asStateFlow()
+
+    /** 本地路径审批事件的收集任务（contract 变化时重启） */
+    private var toolApprovalCollectorJob: kotlinx.coroutines.Job? = null
+
+    /** 收集本地模型路径的工具审批事件（云端路径经 handleSessionEvent 设置同一状态） */
+    private fun collectToolApprovalRequests(contract: GatewayContract) {
+        toolApprovalCollectorJob?.cancel()
+        toolApprovalCollectorJob = viewModelScope.launch {
+            contract.toolApprovalRequests.collect { request ->
+                Log.d(TAG, "Tool approval requested (local path): ${request.toolId}")
+                _pendingToolApproval.value = request
+            }
+        }
+    }
+
+    /**
+     * 用户在确认卡上的决策。
+     * null=拒绝本次（不持久化）；ASK_EVERY_TIME=允许本次；ALWAYS_APPROVE=总是允许
+     * （DANGEROUS 工具不持久化，下次仍会询问）。
+     */
+    fun respondToToolApproval(decision: ai.openclaw.android.skill.ApprovalDecision?) {
+        val request = _pendingToolApproval.value ?: return
+        _pendingToolApproval.value = null
+        val contract = gatewayContractProvider?.invoke()
+        if (contract == null) {
+            Log.w(TAG, "Cannot respond to approval: no gateway contract")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                contract.respondToToolApproval(request.requestId, decision)
+            } catch (e: Exception) {
+                Log.e(TAG, "respondToToolApproval failed: ${e.message}")
+            }
+        }
+    }
+
     // ==================== ScriptEngine UI ====================
 
     /** ScriptEngine UI 管理器 */
@@ -130,6 +175,8 @@ class ChatViewModel : ViewModel() {
     fun updateGatewayContract(contract: GatewayContract?) {
         if (contract != null && !_isTestMode.value) {
             messageGateway = RealGateway { contract }
+            // 本地模型路径审批事件（旁路流）从这里开始收集；contract 变化时重启收集
+            collectToolApprovalRequests(contract)
             Log.d(TAG, "GatewayContract updated → RealGateway")
         } else if (contract == null) {
             messageGateway = null
@@ -173,6 +220,7 @@ class ChatViewModel : ViewModel() {
             val contract = contractProvider?.invoke() ?: gatewayContractProvider?.invoke()
             if (contract != null) {
                 messageGateway = RealGateway { contract }
+                collectToolApprovalRequests(contract)
                 Log.d(TAG, "Switched to RealGateway")
             } else {
                 messageGateway = null
@@ -341,6 +389,11 @@ class ChatViewModel : ViewModel() {
                 _messages.value = updated
             }
             is SessionEvent.ToolResult -> { }
+            is SessionEvent.ToolApprovalRequest -> {
+                // 云端路径：审批事件经消息流内冒泡，挂起等待用户决策（10min 上限）
+                Log.d(TAG, "Tool approval requested (stream path): ${event.toolId}")
+                _pendingToolApproval.value = event
+            }
             is SessionEvent.ReflectionStart -> {
                 val updated = _messages.value.toMutableList()
                 val current = updated[responseIndex]

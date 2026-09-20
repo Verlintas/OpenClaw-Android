@@ -132,6 +132,7 @@ class AppLauncherSkill : Skill {
     private inner class ListAppsTool : SkillTool {
         override val name = "list_apps"
         override val description = "列出已安装的应用"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "filter" to SkillParam(
                 type = "string",

@@ -3,6 +3,7 @@ package ai.openclaw.android.trigger
 import ai.openclaw.android.agent.AgentSession
 import ai.openclaw.android.skill.SkillManager
 import ai.openclaw.android.skill.SkillResult
+import ai.openclaw.android.skill.ToolExecutionOutcome
 import ai.openclaw.android.trigger.models.*
 import ai.openclaw.script.ScriptOrchestrator
 import ai.openclaw.script.ScriptResult
@@ -63,7 +64,7 @@ class ActionExecutorTest {
         )
 
         coEvery { mockSkillManager.executeTool("weather_get_weather", any()) } returns
-            SkillResult(success = true, output = "Sunny, 25°C", error = "")
+            ToolExecutionOutcome.Done(SkillResult(success = true, output = "Sunny, 25°C", error = ""))
 
         val result = executor.execute(action, event)
 
@@ -82,7 +83,7 @@ class ActionExecutorTest {
         val event = TriggerEvent(source = EventSource.CRON, payload = emptyMap())
 
         coEvery { mockSkillManager.executeTool("weather_get_weather", any()) } returns
-            SkillResult(success = false, output = "", error = "API key missing")
+            ToolExecutionOutcome.Done(SkillResult(success = false, output = "", error = "API key missing"))
 
         val result = executor.execute(action, event)
 
@@ -103,7 +104,7 @@ class ActionExecutorTest {
         )
 
         coEvery { mockSkillManager.executeTool("notification_dismiss", any()) } returns
-            SkillResult(success = true, output = "dismissed", error = "")
+            ToolExecutionOutcome.Done(SkillResult(success = true, output = "dismissed", error = ""))
 
         val result = executor.execute(action, event)
 
@@ -307,7 +308,7 @@ class ActionExecutorTest {
         var capturedParams: MutableList<Map<String, Any>> = mutableListOf()
         coEvery { mockSkillManager.executeTool(any(), any()) } answers {
             capturedParams.add(args[1] as Map<String, Any>)
-            SkillResult(success = true, output = "sent", error = "")
+            ToolExecutionOutcome.Done(SkillResult(success = true, output = "sent", error = ""))
         }
 
         executor.execute(action, event)
@@ -332,7 +333,7 @@ class ActionExecutorTest {
         var capturedParams: MutableList<Map<String, Any>> = mutableListOf()
         coEvery { mockSkillManager.executeTool(any(), any()) } answers {
             capturedParams.add(args[1] as Map<String, Any>)
-            SkillResult(success = true, output = "ok", error = "")
+            ToolExecutionOutcome.Done(SkillResult(success = true, output = "ok", error = ""))
         }
 
         executor.execute(action, event)
@@ -356,7 +357,7 @@ class ActionExecutorTest {
         var capturedParams: MutableList<Map<String, Any>> = mutableListOf()
         coEvery { mockSkillManager.executeTool(any(), any()) } answers {
             capturedParams.add(args[1] as Map<String, Any>)
-            SkillResult(success = true, output = "ok", error = "")
+            ToolExecutionOutcome.Done(SkillResult(success = true, output = "ok", error = ""))
         }
 
         executor.execute(action, event)

@@ -352,6 +352,7 @@ fun MainScreen(
     val lastRichContent by chatViewModel.lastRichContent.collectAsStateWithLifecycle()
     val isTestMode by chatViewModel.isTestMode.collectAsStateWithLifecycle()
     val confirmRequest by chatViewModel.confirmRequest.collectAsStateWithLifecycle()
+    val pendingToolApproval by chatViewModel.pendingToolApproval.collectAsStateWithLifecycle()
 
     // Configuration state
     var modelApiKey by remember { mutableStateOf("") }
@@ -688,6 +689,10 @@ fun MainScreen(
                     confirmRequest = confirmRequest,
                     onConfirmResult = { result ->
                         chatViewModel.submitConfirmResult(result)
+                    },
+                    pendingToolApproval = pendingToolApproval,
+                    onToolApprovalResult = { decision ->
+                        chatViewModel.respondToToolApproval(decision)
                     },
                 )
             }

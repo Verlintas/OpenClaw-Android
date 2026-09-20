@@ -24,8 +24,7 @@ class DynamicSkillManager(
     private val dynamicSkillDao: DynamicSkillDao,
     private val skillManager: SkillManager,
     private val orchestrator: ScriptOrchestrator,
-    private val preferenceManager: UserPreferenceManager,
-    private val onUserConfirmation: suspend (toolId: String, description: String) -> ApprovalDecision?
+    private val preferenceManager: UserPreferenceManager
 ) {
     companion object {
         private const val TAG = "DynamicSkillManager"
@@ -66,7 +65,7 @@ class DynamicSkillManager(
             ?: throw IllegalArgumentException("Missing 'id' in skill JSON")
 
         val onUsed = makeOnUsedCallback(skillId)
-        val skill = DynamicSkill.fromJson(json, orchestrator, onUsed, preferenceManager, onUserConfirmation)
+        val skill = DynamicSkill.fromJson(json, orchestrator, onUsed)
 
         // 持久化
         val entity = DynamicSkillEntity(
@@ -104,7 +103,7 @@ class DynamicSkillManager(
         for (entity in entities) {
             try {
                 val onUsed = makeOnUsedCallback(entity.id)
-                val skill = DynamicSkill.fromJson(entity.toolsJson, orchestrator, onUsed, preferenceManager, onUserConfirmation)
+                val skill = DynamicSkill.fromJson(entity.toolsJson, orchestrator, onUsed)
                 skillManager.registerSkill(skill)
                 count++
             } catch (e: Exception) {
@@ -172,7 +171,7 @@ class DynamicSkillManager(
         val entity = dynamicSkillDao.getById(id) ?: return
         dynamicSkillDao.enable(id)
         val onUsed = makeOnUsedCallback(id)
-        val skill = DynamicSkill.fromJson(entity.toolsJson, orchestrator, onUsed, preferenceManager, onUserConfirmation)
+        val skill = DynamicSkill.fromJson(entity.toolsJson, orchestrator, onUsed)
         skillManager.registerSkill(skill)
         Log.i(TAG, "Enabled skill: $id")
     }

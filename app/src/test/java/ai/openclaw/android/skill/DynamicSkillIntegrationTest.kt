@@ -51,15 +51,23 @@ class DynamicSkillIntegrationTest {
     }
 
     @Test
-    fun `security policy applied to idempotent and non-idempotent tools`() {
-        val idempotentPolicy = SecurityReview.reviewTool("get_weather", true, null)
-        assertEquals(ToolSecurityPolicy.AUTO_EXECUTE, idempotentPolicy)
+    fun `security policy applied to read write and dangerous tools`() {
+        // READ（幂等）直通
+        val readPolicy = SecurityReview.reviewTool("weather_get_weather", ToolRiskLevel.READ, null)
+        assertEquals(ToolSecurityPolicy.AUTO_EXECUTE, readPolicy)
 
-        val nonIdempotentPolicy = SecurityReview.reviewTool("set_reminder", false, null)
-        assertEquals(ToolSecurityPolicy.ASK_USER, nonIdempotentPolicy)
+        // WRITE（非幂等）无偏好 → 询问
+        val writePolicy = SecurityReview.reviewTool("reminder_set_reminder", ToolRiskLevel.WRITE, null)
+        assertEquals(ToolSecurityPolicy.ASK_USER, writePolicy)
 
-        val approvedPolicy = SecurityReview.reviewTool("send_email", false,
-            UserApprovalPreference("test_send_email", ApprovalDecision.ALWAYS_APPROVE))
+        // WRITE + ALWAYS_APPROVE 偏好 → 直通
+        val approvedPolicy = SecurityReview.reviewTool("custom_send_email", ToolRiskLevel.WRITE,
+            UserApprovalPreference("custom_send_email", ApprovalDecision.ALWAYS_APPROVE))
         assertEquals(ToolSecurityPolicy.AUTO_EXECUTE, approvedPolicy)
+
+        // DANGEROUS → 一律询问（即使 ALWAYS_APPROVE 也不放行）
+        val dangerousPolicy = SecurityReview.reviewTool("shell_exec", ToolRiskLevel.DANGEROUS,
+            UserApprovalPreference("shell_exec", ApprovalDecision.ALWAYS_APPROVE))
+        assertEquals(ToolSecurityPolicy.ASK_USER, dangerousPolicy)
     }
 }

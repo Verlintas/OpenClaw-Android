@@ -160,6 +160,9 @@ class PermissionManager(private val context: Context) {
     }
 
     companion object {
+        // 以下常量供设置页权限分组（getAllPermissionGroups）使用；
+        // skill 执行所需的权限以 Skill.requiredPermissions 为唯一真源（方案 3 修 N1），
+        // 不再维护第二份 skillId→permissions 硬编码映射。
         val LOCATION_PERMISSIONS = arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
@@ -169,17 +172,6 @@ class PermissionManager(private val context: Context) {
         val CALENDAR_PERMISSIONS = arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)
         val CALL_LOG_PERMISSIONS = arrayOf(Manifest.permission.READ_CALL_LOG)
         val STORAGE_PERMISSIONS = arrayOf(Manifest.permission.MANAGE_EXTERNAL_STORAGE)
-
-        /** Map skillId to its permissions */
-        fun getPermissionsForSkill(skillId: String): Array<String>? = when (skillId) {
-            "location" -> LOCATION_PERMISSIONS
-            "contact" -> CONTACT_PERMISSIONS
-            "sms" -> SMS_PERMISSIONS
-            "calendar" -> CALENDAR_PERMISSIONS
-            "calllog" -> CALL_LOG_PERMISSIONS
-            "storage" -> STORAGE_PERMISSIONS
-            else -> null
-        }
 
         /** Map skillId to Chinese display name */
         fun getSkillDisplayName(skillId: String): String = when (skillId) {

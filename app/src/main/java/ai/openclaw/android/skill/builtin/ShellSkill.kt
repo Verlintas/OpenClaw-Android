@@ -58,6 +58,8 @@ class ShellSkill(
         override val name = "exec"
         override val description =
             "执行 shell 命令并返回输出。注意：受 Android 安全模型限制，只能执行非特权命令。"
+        // 任意命令执行面 → 每次都需用户确认 + 审计（即使命令白名单收窄）
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val parameters = mapOf(
             "command" to SkillParam(
                 type = "string",

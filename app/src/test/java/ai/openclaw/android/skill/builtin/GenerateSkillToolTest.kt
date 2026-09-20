@@ -43,8 +43,7 @@ class GenerateSkillToolTest {
             dynamicSkillDao = mockDao,
             skillManager = mockSkillManager,
             orchestrator = mockOrchestrator,
-            preferenceManager = mockPrefs,
-            onUserConfirmation = { _, _ -> null }
+            preferenceManager = mockPrefs
         )
         tool = GenerateSkillTool(manager)
     }

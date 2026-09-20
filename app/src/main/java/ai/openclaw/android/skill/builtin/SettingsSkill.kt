@@ -90,6 +90,8 @@ class SettingsSkill : Skill {
     private inner class ToggleBluetoothTool : SkillTool {
         override val name = "toggle_bluetooth"
         override val description = "开启或关闭蓝牙"
+        // settings_toggle_* 变更系统全局状态 → 高危（每次确认 + 审计）
+        override val riskLevel = ToolRiskLevel.DANGEROUS
         override val parameters = mapOf(
             "value" to SkillParam(
                 type = "boolean",

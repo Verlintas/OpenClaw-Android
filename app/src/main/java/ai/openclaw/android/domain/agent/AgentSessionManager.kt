@@ -146,6 +146,13 @@ open class AgentSessionManager(
     fun getActiveAgentIds(): List<String> = accessOrder.toList()
 
     /**
+     * 转发审批决策到所有缓存会话（requestId 全局唯一，只有发起会话能匹配，其余 no-op）。
+     */
+    fun respondToToolApproval(requestId: String, decision: ai.openclaw.android.skill.ApprovalDecision?) {
+        sessionCache.values.toList().forEach { it.respondToToolApproval(requestId, decision) }
+    }
+
+    /**
      * Clean up all sessions.
      * 只 shutdown actor（consumer 协程），不取消 actorScope —— manager 若被
      * 复用（测试/重置场景），后续 streamMessage 仍可在同一 scope 上启动新

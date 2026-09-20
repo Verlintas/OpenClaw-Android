@@ -51,6 +51,7 @@ import ai.openclaw.script.bridge.UiProvider
 import ai.openclaw.android.trigger.scheduler.CronScheduler
 import ai.openclaw.android.trigger.models.EventSource
 import okhttp3.OkHttpClient
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,8 +64,6 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -114,24 +113,46 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     override fun getConnectionState(): StateFlow<ConnectionState> = _connectionState
 
-    // Dynamic skill user confirmation
-    data class SkillConfirmationRequest(
-        val toolId: String,
-        val description: String,
-        val requestId: String = java.util.UUID.randomUUID().toString()
-    )
-    private val _confirmationRequests = MutableSharedFlow<SkillConfirmationRequest>(extraBufferCapacity = 1)
-    val confirmationRequests = _confirmationRequests
-    private val confirmationMutex = Mutex()
-    private val pendingConfirmations = mutableMapOf<String, kotlinx.coroutines.CompletableDeferred<ApprovalDecision?>>()
+    // ========== 工具审批（方案 3 统一安全层，本地模型路径） ==========
+    // 云端路径的审批由 AgentSession 经 SessionEvent.ToolApprovalRequest 冒泡；
+    // 本地路径（LocalLLMClient → executeLocalTool）无法注入 SessionEvent 流，
+    // 走此旁路事件流 —— UI（ChatViewModel）同时收集两路，确认卡共用。
 
-    /**
-     * UI 层调用此方法响应用户确认
-     */
-    suspend fun respondToConfirmation(requestId: String, decision: ApprovalDecision?) {
-        confirmationMutex.withLock {
-            pendingConfirmations[requestId]?.complete(decision)
-            pendingConfirmations.remove(requestId)
+    /** 审批等待上限（A3 修订：不可达时挂起等待而非自动批准） */
+    private val localApprovalTimeoutMs = 10 * 60_000L
+
+    private val _toolApprovalRequests = MutableSharedFlow<SessionEvent.ToolApprovalRequest>(extraBufferCapacity = 8)
+    override val toolApprovalRequests: kotlinx.coroutines.flow.Flow<SessionEvent.ToolApprovalRequest> = _toolApprovalRequests
+    private val pendingLocalApprovals = LinkedHashMap<String, kotlinx.coroutines.CompletableDeferred<ApprovalDecision?>>()
+
+    /** UI 层响应用户审批决策：路由到本地路径挂起中的请求 + 各 AgentSession */
+    override suspend fun respondToToolApproval(requestId: String, decision: ApprovalDecision?) {
+        val deferred = synchronized(pendingLocalApprovals) { pendingLocalApprovals.remove(requestId) }
+        deferred?.complete(decision)
+        agentSessionManager?.respondToToolApproval(requestId, decision)
+        agentSession?.respondToToolApproval(requestId, decision)
+    }
+
+    /** 本地路径审批请求：emit 不可达 = 取消（绝不自动批准），超时 = 取消 */
+    private suspend fun requestLocalToolApproval(
+        toolId: String,
+        description: String,
+        risk: ai.openclaw.android.skill.ToolRiskLevel
+    ): ApprovalDecision? {
+        val requestId = java.util.UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<ApprovalDecision?>()
+        synchronized(pendingLocalApprovals) { pendingLocalApprovals[requestId] = deferred }
+        try {
+            val emitted = _toolApprovalRequests.tryEmit(
+                SessionEvent.ToolApprovalRequest(requestId, toolId, description, risk)
+            )
+            if (!emitted) {
+                Log.w(TAG, "Approval event unreachable for $toolId, treating as cancelled")
+                return null
+            }
+            return withTimeoutOrNull(localApprovalTimeoutMs) { deferred.await() }
+        } finally {
+            synchronized(pendingLocalApprovals) { pendingLocalApprovals.remove(requestId) }
         }
     }
 
@@ -218,6 +239,7 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
                 Log.e(TAG, "Cannot create DynamicSkillManager: skillManager is null")
                 return false
             }
+            // createDynamicSkillManager 内部会把 UserPreferenceManager 回填到 SkillManager
             dynamicSkillManager = createDynamicSkillManager(db.dynamicSkillDao(), sm)
             dynamicSkillManager?.loadAllSaved()
             dynamicSkillManager?.setToolsChangedListener {
@@ -753,54 +775,32 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
     }
 
     /**
-     * Create DynamicSkillManager with real user confirmation flow
+     * Create DynamicSkillManager.
+     * 工具执行的安全审查/审批已上提到 SkillManager 统一入口，此处只负责持久化与生命周期。
+     * 同时把 [UserPreferenceManager] 回填到 SkillManager（统一安全层持久化 ALWAYS_APPROVE/DENY），
+     * 正常启动与 reconfigure 两条初始化路径都经过这里。
      */
     private fun createDynamicSkillManager(
         dao: ai.openclaw.android.data.local.DynamicSkillDao,
         sm: ai.openclaw.android.skill.SkillManager
     ): DynamicSkillManager {
-        val onConfirmation: suspend (String, String) -> ApprovalDecision? = { toolId, description ->
-            val requestId = java.util.UUID.randomUUID().toString()
-            val deferred = kotlinx.coroutines.CompletableDeferred<ApprovalDecision?>()
-            confirmationMutex.withLock {
-                pendingConfirmations[requestId] = deferred
-            }
-            serviceScope.launch {
-                try {
-                    _confirmationRequests.emit(
-                        SkillConfirmationRequest(toolId = toolId, description = description, requestId = requestId)
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to emit confirmation: ${e.message}")
-                    confirmationMutex.withLock {
-                        // 审批请求不可达 = 用户无法决策：视为取消，绝不自动批准
-                        pendingConfirmations[requestId]?.complete(null)
-                        pendingConfirmations.remove(requestId)
-                    }
-                }
-            }
-            // 超时 = 用户未决策（锁屏/切走/确认卡未渲染）：视为取消而非自动批准。
-            // 返回 null → DynamicTool 走「用户取消了操作」分支，且不持久化任何偏好。
-            val decision = withTimeoutOrNull(30_000L) { deferred.await() }
-            if (decision == null) {
-                Log.w(TAG, "Confirmation timed out for $toolId, treating as cancelled")
-                confirmationMutex.withLock { pendingConfirmations.remove(requestId) }
-            }
-            decision
-        }
+        val prefs = sm.preferenceManager
+            ?: ai.openclaw.android.skill.UserPreferenceManager(service).also { sm.preferenceManager = it }
         return DynamicSkillManager(
             context = service,
             dynamicSkillDao = dao,
             skillManager = sm,
             orchestrator = scriptOrchestrator!!,
-            preferenceManager = ai.openclaw.android.skill.UserPreferenceManager(service),
-            onUserConfirmation = onConfirmation
+            preferenceManager = prefs
         )
     }
 
     /**
      * Execute a tool call from the on-device model via the skill system.
      * Called by LocalLLMClient when LiteRT's model decides to use a tool.
+     *
+     * Skill 工具走 SkillManager 统一安全层（与云端路径同一审查），审批经
+     * [requestLocalToolApproval] 旁路事件流冒泡到 UI。
      */
     private suspend fun executeLocalTool(toolName: String, argsJson: String): String {
         val sm = skillManager ?: return "{\"error\": \"SkillManager not ready\"}"
@@ -820,8 +820,20 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
 
         // Skill tools have namespaced names: skillId_toolName
         if (toolName.contains("_") && toolName.split("_").size >= 2) {
-            val result = sm.executeTool(toolName, params)
-            return if (result.success) result.output else (result.error ?: "Skill error")
+            val outcome = sm.executeTool(
+                toolName, params,
+                requestApproval = ::requestLocalToolApproval
+                // 本地路径无系统弹窗通道：缺权限 → Denied 文本（A4：不再静默）
+            )
+            return when (outcome) {
+                is ai.openclaw.android.skill.ToolExecutionOutcome.Done ->
+                    if (outcome.result.success) outcome.result.output
+                    else (outcome.result.error ?: "Skill error")
+                is ai.openclaw.android.skill.ToolExecutionOutcome.Denied -> outcome.reason
+                // requester 非空时不会到达（审批循环在 executeTool 内完成）
+                is ai.openclaw.android.skill.ToolExecutionOutcome.NeedsApproval ->
+                    "工具 ${outcome.toolId} 需要用户确认后才能执行。"
+            }
         }
 
         // Accessibility tools

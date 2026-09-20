@@ -138,6 +138,7 @@ class ReminderSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "list_reminders"
             override val description = "列出所有待处理的提醒"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = emptyMap<String, SkillParam>()
             
             override suspend fun execute(params: Map<String, Any>): SkillResult {

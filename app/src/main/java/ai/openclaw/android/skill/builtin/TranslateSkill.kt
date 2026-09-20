@@ -35,6 +35,7 @@ class TranslateSkill : Skill {
         object : SkillTool {
             override val name = "translate"
             override val description = "翻译文本到目标语言"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "text" to SkillParam("string", "要翻译的文本", true),
                 "target_lang" to SkillParam("string", "目标语言代码（如 zh, en, ja, ko）", true),

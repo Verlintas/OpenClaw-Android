@@ -32,6 +32,7 @@ class MultiSearchSkill : Skill {
     private inner class SearchTool : SkillTool {
         override val name = "search"
         override val description = "搜索互联网信息"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "query" to SkillParam("string", "搜索关键词", true)
         )

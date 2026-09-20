@@ -64,6 +64,7 @@ class NotificationSkill(private val context: Context) : Skill {
     inner class ListNotificationsTool : SkillTool {
         override val name = "list_notifications"
         override val description = "获取当前通知列表，支持按包名过滤"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "packageName" to SkillParam("string", "按包名过滤（可选）", false),
             "limit" to SkillParam("number", "返回数量限制", false, "20"),

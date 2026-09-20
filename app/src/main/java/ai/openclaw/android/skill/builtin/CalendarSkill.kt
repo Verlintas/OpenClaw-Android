@@ -17,6 +17,11 @@ class CalendarSkill(private val context: Context) : Skill {
     override val name = "日程"
     override val description = "管理日历事件和日程"
     override val version = "2.0.0"
+
+    override val requiredPermissions = listOf(
+        android.Manifest.permission.READ_CALENDAR,
+        android.Manifest.permission.WRITE_CALENDAR
+    )
     
     override val instructions = """
 # Calendar Skill
@@ -39,6 +44,7 @@ class CalendarSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "list_events"
             override val description = "列出日历事件"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "days" to SkillParam("number", "查询天数（默认7天）", false, 7)
             )

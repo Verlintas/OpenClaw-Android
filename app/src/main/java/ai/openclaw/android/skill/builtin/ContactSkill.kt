@@ -17,6 +17,10 @@ class ContactSkill(private val context: Context) : Skill {
     override val name = "通讯录"
     override val description = "查询联系人信息和拨打电话"
     override val version = "2.0.0"
+
+    override val requiredPermissions = listOf(
+        android.Manifest.permission.READ_CONTACTS
+    )
     
     override val instructions = """
 # Contact Skill
@@ -45,6 +49,7 @@ class ContactSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "search_contacts"
             override val description = "搜索联系人"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "query" to SkillParam("string", "搜索关键词（姓名或号码）", true)
             )
@@ -157,6 +162,7 @@ class ContactSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "get_contact"
             override val description = "获取联系人详情"
+            override val riskLevel = ToolRiskLevel.READ
             override val parameters = mapOf(
                 "name" to SkillParam("string", "联系人姓名", true)
             )
@@ -259,6 +265,8 @@ class ContactSkill(private val context: Context) : Skill {
         object : SkillTool {
             override val name = "call_contact"
             override val description = "拨打电话"
+            // 拨号是外部付费动作，不可逆 → 每次都需用户确认
+            override val riskLevel = ToolRiskLevel.DANGEROUS
             override val parameters = mapOf(
                 "phone_number" to SkillParam("string", "电话号码（可选，与contact_name二选一）", false),
                 "contact_name" to SkillParam("string", "联系人姓名（可选，与phone_number二选一）", false)

@@ -43,6 +43,11 @@ class CameraSkill(
     override val description = "使用设备摄像头拍照、录制短视频、读取相册最新照片"
     override val version = "1.0.0"
 
+    override val requiredPermissions = listOf(
+        android.Manifest.permission.CAMERA,
+        android.Manifest.permission.RECORD_AUDIO
+    )
+
     override val instructions = """
 # Camera Skill
 
@@ -280,6 +285,7 @@ class CameraSkill(
     private inner class GalleryLatestTool : SkillTool {
         override val name = "gallery_latest"
         override val description = "获取相册中最新的照片。"
+        override val riskLevel = ToolRiskLevel.READ
         override val parameters = mapOf(
             "count" to SkillParam(
                 type = "number",

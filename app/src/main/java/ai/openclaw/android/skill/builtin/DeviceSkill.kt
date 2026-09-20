@@ -69,6 +69,7 @@ class DeviceSkill(
 
     private inner class InfoTool : SkillTool {
         override val name = "info"
+        override val riskLevel = ToolRiskLevel.READ
         override val description = "获取设备基本信息。"
         override val parameters = emptyMap<String, SkillParam>()
 
@@ -118,6 +119,7 @@ class DeviceSkill(
 
     private inner class StatusTool : SkillTool {
         override val name = "status"
+        override val riskLevel = ToolRiskLevel.READ
         override val description = "获取设备当前运行状态（电池、存储、内存、网络、运行时间）。"
         override val parameters = emptyMap<String, SkillParam>()
 
@@ -168,6 +170,7 @@ class DeviceSkill(
 
     private inner class HealthTool : SkillTool {
         override val name = "health"
+        override val riskLevel = ToolRiskLevel.READ
         override val description = "设备健康检查，返回综合健康评分和详细信息。"
         override val parameters = emptyMap<String, SkillParam>()
 
@@ -249,6 +252,7 @@ class DeviceSkill(
 
     private inner class RunningAppsTool : SkillTool {
         override val name = "running_apps"
+        override val riskLevel = ToolRiskLevel.READ
         override val description = "获取当前运行的应用列表。"
         override val parameters = mapOf(
             "limit" to SkillParam(
