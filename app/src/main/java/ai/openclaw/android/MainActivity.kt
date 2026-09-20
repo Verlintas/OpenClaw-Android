@@ -1021,13 +1021,24 @@ fun SettingsScreen(
 
                     // API Key (only needed for cloud providers)
                     if (modelProvider != "LOCAL") {
+                        var showApiKey by remember { mutableStateOf(false) }
                         OutlinedTextField(
                             value = modelApiKey,
                             onValueChange = onModelApiKeyChange,
-                            label = { Text("API Key (明文显示)") },
+                            label = { Text("API Key") },
                             placeholder = { Text("sk-xxx") },
-                            visualTransformation = VisualTransformation.None,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                            visualTransformation = if (showApiKey) VisualTransformation.None
+                                                   else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showApiKey = !showApiKey }) {
+                                    Icon(
+                                        imageVector = if (showApiKey) Icons.Default.VisibilityOff
+                                                      else Icons.Default.Visibility,
+                                        contentDescription = if (showApiKey) "隐藏密钥" else "显示密钥"
+                                    )
+                                }
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(top = 8.dp),

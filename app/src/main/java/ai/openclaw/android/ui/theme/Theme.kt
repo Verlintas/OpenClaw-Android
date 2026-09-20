@@ -14,19 +14,50 @@ import androidx.core.view.WindowCompat
  * Sci-Fi 暗色主题色板 — 深海蓝 + 青色霓虹
  */
 private val SciFiDarkColorScheme = darkColorScheme(
+    // 主色 —— 深墨蓝字压在亮青底上，对比度 10.2:1
     primary = SciFiPrimary,
     onPrimary = SciFiOnPrimary,
+    primaryContainer = SciFiPrimaryContainer,
+    onPrimaryContainer = SciFiOnPrimaryContainer,
+    // 次色
     secondary = SciFiSecondary,
+    onSecondary = SciFiOnPrimary,
+    secondaryContainer = SciFiSecondaryContainer,
+    onSecondaryContainer = SciFiOnSecondaryContainer,
+    // 三级色（仅装饰，紫底配浅色字 5.2:1）
     tertiary = SciFiTertiary,
+    onTertiary = SciFiOnBackground,
+    tertiaryContainer = SciFiTertiaryContainer,
+    onTertiaryContainer = SciFiOnTertiaryContainer,
+    // 错误色（红底配深墨蓝字 5.1:1）
     error = SciFiError,
+    onError = SciFiOnPrimary,
+    errorContainer = SciFiErrorContainer,
+    onErrorContainer = SciFiOnErrorContainer,
+    // 基底
     background = SciFiBackground,
+    onBackground = SciFiOnBackground,
     surface = SciFiSurface,
+    onSurface = SciFiOnSurface,
     surfaceVariant = SciFiSurfaceVariant,
+    onSurfaceVariant = SciFiOnSurfaceVariant,
+    // Surface 层级 —— 补齐后不再回落 Material3 默认紫灰
+    surfaceDim = SciFiSurfaceDim,
+    surfaceBright = SciFiSurfaceBright,
+    surfaceContainerLowest = SciFiSurfaceContainerLowest,
+    surfaceContainerLow = SciFiSurfaceContainerLow,
+    surfaceContainer = SciFiSurfaceContainer,
+    surfaceContainerHigh = SciFiSurfaceContainerHigh,
+    surfaceContainerHighest = SciFiSurfaceContainerHighest,
+    // 反转色
+    inverseSurface = SciFiInverseSurface,
+    inverseOnSurface = SciFiInverseOnSurface,
+    inversePrimary = SciFiInversePrimary,
+    // 描边与遮罩
     outline = SciFiOutline,
     outlineVariant = SciFiOutlineVariant,
-    onBackground = SciFiOnBackground,
-    onSurface = SciFiOnSurface,
-    onSurfaceVariant = SciFiOnSurfaceVariant
+    scrim = SciFiScrim,
+    surfaceTint = SciFiPrimary
 )
 
 /**
@@ -46,21 +77,6 @@ private val SciFiLightColorScheme = lightColorScheme(
     onBackground = SciFiLightOnSurface,
     onSurface = SciFiLightOnSurface,
     onSurfaceVariant = SciFiOnSurfaceVariant
-)
-
-/**
- * 兼容旧版 Material 动态配色（可切换回紫色主题）
- */
-private val LegacyDarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
-)
-
-private val LegacyLightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
 )
 
 @Composable

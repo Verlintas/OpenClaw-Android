@@ -85,6 +85,7 @@ import ai.openclaw.android.ui.theme.SciFiBackground
 import ai.openclaw.android.ui.theme.SciFiSurfaceVariant
 import ai.openclaw.android.ui.theme.SciFiOnSurfaceVariant
 import ai.openclaw.android.ui.theme.SciFiPrimary
+import ai.openclaw.android.ui.theme.SciFiOnPrimary
 import ai.openclaw.android.ui.theme.SciFiOutlineVariant
 import ai.openclaw.android.ui.theme.SciFiGlow
 import androidx.compose.foundation.border
@@ -679,7 +680,7 @@ fun ChatScreen(
                             if (inputText.isEmpty()) {
                                 Text(
                                     text = "输入消息...",
-                                    color = SciFiOnSurfaceVariant.copy(alpha = 0.6f)
+                                    color = SciFiOnSurfaceVariant
                                 )
                             }
                             BasicTextField(
@@ -765,8 +766,8 @@ fun ChatScreen(
                 if (!isVolumeKeyListening()) {
                     Text(
                         text = "💡 长按音量下键可语音输入",
-                        color = SciFiOnSurfaceVariant.copy(alpha = 0.35f),
-                        fontSize = 10.sp,
+                        color = SciFiOnSurfaceVariant,
+                        fontSize = 11.sp,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
                     )
                 }
@@ -1367,7 +1368,7 @@ private fun UserMessageBubble(
                     is MessageSegment.Text -> {
                         Text(
                             text = segment.text,
-                            color = Color.White
+                            color = SciFiOnPrimary
                         )
                     }
                     is MessageSegment.A2UICard -> {
@@ -1393,7 +1394,7 @@ private fun UserMessageBubble(
             Text(
                 text = dateFormat.format(Date(message.timestamp)),
                 style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.7f),
+                color = SciFiOnPrimary.copy(alpha = 0.72f),
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
@@ -1421,7 +1422,7 @@ private fun AiMessageBubble(
                 onLongClick = onLongClick
             )
             .clip(RoundedCornerShape(20.dp))
-            .background(Color(0x08FFFFFF))
+            .background(SciFiAiBubbleBg)
             .drawBehind {
                 // 左侧渐变状态线
                 drawLine(

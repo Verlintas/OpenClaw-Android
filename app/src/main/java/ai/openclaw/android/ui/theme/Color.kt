@@ -38,6 +38,41 @@ val SciFiEnergyBar       = Color(0xFF06D6A0)  // 能量条
 val SciFiParticle        = Color(0x0DFFFFFF)  // 粒子背景 alpha=0.05
 val SciFiGrid            = Color(0x08FFFFFF)  // 网格纹理 alpha=0.03
 
+// ==================== Material3 容器色 ====================
+// 补齐缺失槽位，避免回落到 Material3 默认的紫色系（实测会渲染成 #4C3987）
+
+// 主色容器 —— 深青绿底 + 高亮青绿字，对比度 9.9:1
+val SciFiPrimaryContainer        = Color(0xFF063F31)
+val SciFiOnPrimaryContainer      = Color(0xFFA7F3E0)
+
+// 次色容器 —— 深冰蓝底
+val SciFiSecondaryContainer      = Color(0xFF123449)
+val SciFiOnSecondaryContainer    = Color(0xFFBFE6FA)
+
+// 三级色容器 —— 深紫底（仅作装饰点缀，不用于正文）
+val SciFiTertiaryContainer       = Color(0xFF2A1A4D)
+val SciFiOnTertiaryContainer     = Color(0xFFDCCBFF)
+
+// 错误容器
+val SciFiErrorContainer          = Color(0xFF4A1414)
+val SciFiOnErrorContainer        = Color(0xFFFFD9D6)
+
+// ==================== Surface 层级 ====================
+// 由暗到亮，替代 Material3 默认的紫灰色阶
+
+val SciFiSurfaceDim              = Color(0xFF070A12)
+val SciFiSurfaceBright           = Color(0xFF1B2436)
+val SciFiSurfaceContainerLowest  = Color(0xFF05070E)
+val SciFiSurfaceContainerLow     = Color(0xFF0D1220)
+val SciFiSurfaceContainer        = Color(0xFF111827)   // NavigationBar 底
+val SciFiSurfaceContainerHigh    = Color(0xFF172032)   // Card 底
+val SciFiSurfaceContainerHighest = Color(0xFF1E293B)   // 浮层 / Dialog 底
+
+val SciFiInverseSurface          = Color(0xFFE2E8F0)
+val SciFiInverseOnSurface        = Color(0xFF0A0E1A)
+val SciFiInversePrimary          = Color(0xFF059669)
+val SciFiScrim                   = Color(0xFF000000)
+
 // ==================== 亮色模式色板（可选） ====================
 
 val SciFiLightBackground  = Color(0xFFF8FAFC)
@@ -50,12 +85,3 @@ val SciFiLightAiBubbleBorder = Color(0xFF059669)
 val SciFiLightUserBubbleStart = Color(0xFF059669)  // 亮色模式用户气泡起始
 val SciFiLightUserBubbleEnd   = Color(0xFF4CC9F0)  // 亮色模式用户气泡结束
 
-// ==================== 保留旧色值（向后兼容） ====================
-
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
-
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
