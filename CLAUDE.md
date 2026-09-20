@@ -82,14 +82,12 @@ User (text + optional images) → ChatScreen → AgentSession (conversation mana
 
 - **`SmartNotificationListener`** — Notification listener service with ML-based classification. Exposes two **independent** states: `isNotificationListenerEnabled(context)` (reads `Settings.Secure.enabled_notification_listeners` = permission granted) and `isConnected` StateFlow (service actually bound by the system). On some OEM ROMs (Honor/MagicOS `iaware` blocks the bind) permission reads true while the service never starts — never infer one from the other.
 
-### Multi-Agent System (`domain/agent/`, `agent/`, `config/`)
+### Multi-Agent System (`domain/agent/`, `agent/`)
 
 Three agents defined in `assets/agents.json`: main (OpenClaw), coder, security. Each has its own model, system prompt, and tool whitelist.
-- **`AgentConfigManager`** — Loads and persists agent configs from `agents.json`
+- **`AgentConfigManager`** — Loads agent configs from `agents.json` (read-only from assets)
 - **`AgentRouter`** — Routes messages to agents by @mention or keyword matching
-- **`AgentSessionManager`** — Manages per-agent `AgentSession` lifecycle
-- **`AgentRegistry`** — Runtime registry of active agents and their sessions
-- **`AgentManagementSkill`** — Exposes agent management as a skill (list, create, delete)
+- **`AgentSessionManager`** — Manages per-agent `AgentSession` lifecycle (LRU cache, max 3)
 
 ### Dynamic Skills (`skill/`)
 
@@ -212,7 +210,7 @@ Skills live in `skill/builtin/` and implement the `Skill` interface. Static skil
 
 To add a new skill: create a class implementing `Skill`, register it in `SkillManager.loadBuiltinSkills()`.
 
-Built-in skills: AgentManagement, AppLauncher, Calendar, Contact, File, GenerateSkill, Location, MultiSearch, Notification, Reminder, Script, Settings, Translate, Weather.
+Built-in skills: AppLauncher, Calendar, Camera, Contact, Device, File, FileXfer, GenerateSkill, Location, MultiSearch, Notification, Notify, Reminder, Screen, Script, Settings, Shell, SMS, Translate, Weather.
 
 ### UI Layer (`ui/`)
 

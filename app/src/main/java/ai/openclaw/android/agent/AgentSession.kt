@@ -4,7 +4,7 @@ import android.util.Log
 import ai.openclaw.android.LogManager
 import ai.openclaw.android.util.CrashRecord
 import com.tencent.bugly.crashreport.CrashReport
-import ai.openclaw.android.config.AgentConfig
+import ai.openclaw.android.data.model.AgentConfig
 import ai.openclaw.android.data.model.MessageRole
 import ai.openclaw.android.domain.AgentResponse
 import ai.openclaw.android.domain.DeviceCapabilities
@@ -90,7 +90,7 @@ class AgentSession(
         _agentConfig = agentConfig
         this.agentConfig = agentConfig
         // Auto-select reflection strategy based on agent config
-        _reflectionConfig = ReflectionConfig.defaultFor(agentConfig.reflectionStrategy)
+        _reflectionConfig = ReflectionConfig.defaultFor(parseReflectionStrategy(agentConfig.reflectionStrategy))
     }
 
     /**
@@ -112,6 +112,11 @@ class AgentSession(
     companion object {
         private const val TAG = "AgentSession"
         private const val MAX_TOOL_ROUNDS = 50
+
+        /** Parse reflection strategy name (case-insensitive) from JSON config; null/unknown → NONE */
+        private fun parseReflectionStrategy(raw: String?): ReflectionStrategy =
+            raw?.let { runCatching { ReflectionStrategy.valueOf(it.uppercase()) }.getOrNull() }
+                ?: ReflectionStrategy.NONE
 
         private const val BASE_SYSTEM_PROMPT = """You are an AI assistant on an Android device with tool access.
 
@@ -412,11 +417,11 @@ Example:
         Log.d(TAG, "System prompt set (${prompt.length} chars)")
     }
 
-    // Agent config (optional, set by AgentRegistry)
+    // Agent config (optional, set via factory constructor or setter)
     private var agentConfig: AgentConfig? = null
 
     /**
-     * Set agent config (optional, called by AgentRegistry)
+     * Set agent config (optional)
      */
     fun setAgentConfig(config: AgentConfig) {
         agentConfig = config
@@ -427,7 +432,7 @@ Example:
      * Get effective max context tokens (from config or default).
      *
      * Treats `maxContextTokens <= 0` on the agent config as "not set" and
-     * falls back to the session default (8k) so a missing yaml value doesn't
+     * falls back to the session default (8k) so an unset value doesn't
      * silently turn trim into a no-op (0 means "trim every round", which is
      * even worse than never trimming).
      */
@@ -861,28 +866,6 @@ Example:
 
     // ==================== Tool Execution ====================
 
-    private suspend fun executeAndRecordToolCalls(toolCalls: List<ToolCall>) {
-        // Add assistant message with tool_calls to history
-        // (required for proper multi-turn function calling)
-        history.add(Message(
-            role = "assistant",
-            content = "",
-            toolCalls = toolCalls
-        ))
-
-        for (toolCall in toolCalls) {
-            val toolName = toolCall.function.name
-            Log.d(TAG, "Tool call: $toolName, args: ${toolCall.function.arguments}")
-
-            val result = executeToolCall(toolCall)
-            history.add(Message(
-                role = "tool",
-                content = result,
-                toolCallId = toolCall.id
-            ))
-        }
-    }
-
     private suspend fun executeToolCall(toolCall: ToolCall): String {
         toolExecutionMutex.lock()
         return try {
@@ -965,9 +948,6 @@ Example:
             addAll(currentHistory)
         }
     }
-
-    /** Legacy buildMessages for backward compat (uses mutable history) */
-    private fun buildMessages(): List<Message> = buildMessagesInternal(history)
 
     /**
      * Token-aware history trimming.

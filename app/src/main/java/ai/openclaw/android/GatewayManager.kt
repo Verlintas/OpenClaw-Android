@@ -4,7 +4,6 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.util.Log
 import ai.openclaw.android.accessibility.AccessibilityBridge
-import ai.openclaw.android.agent.AgentRegistry
 import ai.openclaw.android.agent.AgentSession
 import ai.openclaw.android.agent.SessionEvent
 import ai.openclaw.android.agent.AgentPromptLoader
@@ -37,7 +36,6 @@ import ai.openclaw.android.skill.builtin.NotificationSkill
 import ai.openclaw.android.skill.builtin.GenerateSkillTool
 import ai.openclaw.android.skill.builtin.GenerateSkillSkill
 import ai.openclaw.android.skill.DynamicSkillManager
-import ai.openclaw.android.config.AgentConfig
 import ai.openclaw.android.skill.ApprovalDecision
 import ai.openclaw.android.feishu.FeishuClient
 import ai.openclaw.android.feishu.OkHttpFeishuClient
@@ -67,8 +65,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * GatewayManager - Manages all Gateway components
@@ -86,7 +83,6 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
     private var modelClient: ModelClient? = null
     private var localLLMClient: LocalLLMClient? = null
     private var agentSession: AgentSession? = null
-    private var agentRegistry: AgentRegistry? = null
     private var accessibilityBridge: AccessibilityBridge? = null
     private var skillManager: SkillManager? = null
     private var pluginManager: PluginManager? = null
@@ -165,19 +161,6 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         return agentSession?.handleMessageStream(text, images)
             ?: flow { emit(SessionEvent.Error("AgentSession not ready")) }
     }
-
-    /**
-     * Send message to a specific agent
-     */
-    fun sendMessageToAgent(agentId: String, text: String, images: List<ImageContent>? = null): Flow<SessionEvent> =
-        agentRegistry?.getSession(agentId)?.handleMessageStream(text, images)
-            ?: flow { emit(SessionEvent.Error("AgentRegistry not ready")) }
-
-    /**
-     * List all configured agents
-     */
-    fun listAgents(): List<AgentConfig> =
-        agentRegistry?.listAgents() ?: emptyList()
 
     override suspend fun reconfigureModel(config: ModelConfig): Boolean {
         Log.d(TAG, "Reconfiguring model: provider=${config.provider}")
@@ -464,7 +447,6 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         pluginManager = null
 
         agentSession = null
-        agentRegistry = null
         accessibilityBridge = null
 
         agentConfigManager = null
@@ -784,17 +766,20 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to emit confirmation: ${e.message}")
                     confirmationMutex.withLock {
-                        pendingConfirmations[requestId]?.complete(ApprovalDecision.ALWAYS_APPROVE)
+                        // 审批请求不可达 = 用户无法决策：视为取消，绝不自动批准
+                        pendingConfirmations[requestId]?.complete(null)
                         pendingConfirmations.remove(requestId)
                     }
                 }
             }
-            try {
-                withTimeout(30_000L) { deferred.await() }
-            } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "Confirmation timed out for $toolId, auto-approving")
-                ApprovalDecision.ALWAYS_APPROVE
+            // 超时 = 用户未决策（锁屏/切走/确认卡未渲染）：视为取消而非自动批准。
+            // 返回 null → DynamicTool 走「用户取消了操作」分支，且不持久化任何偏好。
+            val decision = withTimeoutOrNull(30_000L) { deferred.await() }
+            if (decision == null) {
+                Log.w(TAG, "Confirmation timed out for $toolId, treating as cancelled")
+                confirmationMutex.withLock { pendingConfirmations.remove(requestId) }
             }
+            decision
         }
         return DynamicSkillManager(
             context = service,

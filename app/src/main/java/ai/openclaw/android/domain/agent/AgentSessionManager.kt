@@ -3,9 +3,7 @@ package ai.openclaw.android.domain.agent
 import ai.openclaw.android.ConfigManager
 import ai.openclaw.android.accessibility.AccessibilityBridge
 import ai.openclaw.android.agent.AgentSession
-import ai.openclaw.android.data.model.AgentConfig as DataAgentConfig
-import ai.openclaw.android.config.AgentConfig
-import ai.openclaw.android.domain.ReflectionStrategy
+import ai.openclaw.android.data.model.AgentConfig
 import ai.openclaw.android.model.OpenAIClient
 import ai.openclaw.android.model.AnthropicClient
 import ai.openclaw.android.model.LocalLLMClient
@@ -39,22 +37,6 @@ open class AgentSessionManager(
     private val sharedLocalLLMClient: LocalLLMClient? = null
 ) {
 
-    private fun toConfigAgent(dataConfig: DataAgentConfig): AgentConfig {
-        val reflectionStrategy = dataConfig.reflectionStrategy?.let {
-            runCatching { ReflectionStrategy.valueOf(it.uppercase()) }.getOrNull()
-        } ?: ReflectionStrategy.NONE
-
-        return AgentConfig(
-            id = dataConfig.id,
-            name = dataConfig.name,
-            model = dataConfig.model,
-            systemPrompt = dataConfig.systemPrompt ?: "",
-            maxContextTokens = dataConfig.maxContextTokens,
-            tools = dataConfig.tools,
-            reflectionStrategy = reflectionStrategy
-        )
-    }
-
     companion object {
         private const val TAG = "AgentSessionManager"
     }
@@ -81,11 +63,10 @@ open class AgentSessionManager(
         val config = configManager.getAgentById(agentId) ?: configManager.getDefaultAgent()
         val modelClient = createModelClient(config)
 
-        val agentConfig = toConfigAgent(config)
         val session = AgentSession(
             modelClient = modelClient,
             skillManager = skillManager,
-            agentConfig = agentConfig,
+            agentConfig = config,
             permissionManager = permissionManager
         )
 
@@ -97,9 +78,8 @@ open class AgentSessionManager(
             }
         )
 
-        // Configure reflection strategy
-        session.setReflectionStrategy(agentConfig.reflectionStrategy)
-        Log.d(TAG, "Reflection strategy for '$agentId': ${agentConfig.reflectionStrategy}")
+        // Reflection strategy is auto-selected by the AgentSession factory constructor
+        Log.d(TAG, "Reflection strategy for '$agentId': ${config.reflectionStrategy ?: "NONE"}")
 
         // Cache with eviction (skip if maxCachedSessions is 0)
         if (maxCachedSessions > 0) {
@@ -108,7 +88,7 @@ open class AgentSessionManager(
             accessOrder.add(agentId)
         }
 
-        Log.i(TAG, "Created new session for '$agentId' (model: ${config.model}, reflection: ${agentConfig.reflectionStrategy})")
+        Log.i(TAG, "Created new session for '$agentId' (model: ${config.model}, reflection: ${config.reflectionStrategy ?: "NONE"})")
         return session
     }
 
@@ -139,7 +119,7 @@ open class AgentSessionManager(
      * Build a ModelClient configured for the given agent.
      * Marked `protected open` so tests can override with a mock.
      */
-    protected open fun createModelClient(config: DataAgentConfig): ModelClient {
+    protected open fun createModelClient(config: AgentConfig): ModelClient {
         // When user selected LOCAL provider, all agents use on-device model
         val userProvider = ConfigManager.getModelProvider()
         if (userProvider == "LOCAL") {

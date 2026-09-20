@@ -251,9 +251,6 @@ dependencies {
     // Plugin SDK (Core interfaces for Host and Plugins)
     implementation(project(":plugin-sdk"))
 
-    // YAML parsing for agent configuration
-    implementation("org.yaml:snakeyaml:2.2")
-
     // Testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
