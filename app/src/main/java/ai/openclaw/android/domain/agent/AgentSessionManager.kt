@@ -99,12 +99,39 @@ open class AgentSessionManager(
         val config = configManager.getAgentById(agentId) ?: configManager.getDefaultAgent()
         val modelClient = createModelClient(config)
 
-        val session = AgentSession(
-            modelClient = modelClient,
-            skillManager = skillManager,
-            agentConfig = config,
-            permissionManager = permissionManager
-        )
+        // 端侧模型的窗口与云端默认（8000）不是一回事：把会话 trim 预算对齐到模型窗口，
+        // 并给 system prompt + 工具 schema 留出空间（端侧常注入 50+ 工具，占很大一块）。
+        // 系数取 0.6 是为了让上层裁剪后的历史不再触发 LocalLLMClient 内部的二次裁剪，
+        // 否则历史前缀每轮都在变，KV-cache 复用会失效。
+        val localWindow = (modelClient as? LocalLLMClient)?.getContextWindowTokens()
+        val maxContextTokens = localWindow?.let { (it * 0.6f).toInt() }
+
+        val session = if (maxContextTokens != null) {
+            AgentSession(
+                modelClient = modelClient,
+                skillManager = skillManager,
+                agentConfig = config,
+                permissionManager = permissionManager,
+                maxContextTokens = maxContextTokens
+            )
+        } else {
+            AgentSession(
+                modelClient = modelClient,
+                skillManager = skillManager,
+                agentConfig = config,
+                permissionManager = permissionManager
+            )
+        }
+
+        if (localWindow != null) {
+            Log.i(TAG, "LOCAL model: window=$localWindow, session maxContextTokens=$maxContextTokens")
+        }
+
+        // 必须在 setToolsWithSkills() 之前：它决定用哪份 system prompt、
+        // 以及工具是否收敛到端侧白名单。
+        if (localWindow != null) {
+            session.setOnDeviceMode(true)
+        }
 
         // Initialize tools
         session.setToolsWithSkills(

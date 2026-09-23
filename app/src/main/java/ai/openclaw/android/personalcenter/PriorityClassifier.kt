@@ -47,7 +47,11 @@ object PriorityClassifier {
     suspend fun classifyBatch(items: List<CenterItem>): List<CenterItem> {
         if (items.isEmpty()) return emptyList()
 
-        val results = try {
+        // 显式声明为可空：实测真机上这里拿到过 null（Kotlin 对声明为非空返回值的
+        // 接口实现不插运行时检查，一旦 LLM 侧真的返回空引用，下面 items.map 里
+        // results[item.id] 就会以 NPE 的形式炸出来，而 ART 内联后栈帧会落在调用方
+        // PersonalCenterViewModel.classifyPrioritySafely，极难定位）。
+        val results: Map<String, PriorityResult>? = try {
             withTimeout(LLM_TIMEOUT_MS) {
                 llmClassifier?.classify(items) ?: runRuleBasedClassification(items)
             }
@@ -57,6 +61,11 @@ object PriorityClassifier {
         } catch (e: Exception) {
             Log.w(TAG, "LLM classification failed: ${e.message}, falling back to rules")
             runRuleBasedClassification(items)
+        }
+
+        if (results == null) {
+            Log.e(TAG, "classifyBatch: results 为空引用，本轮全部按规则兜底返回")
+            return items
         }
 
         return items.map { item ->

@@ -90,6 +90,28 @@ interface GatewayContract {
 
     /** 获取会话的消息数 */
     suspend fun getMessageCount(sessionId: String): Int
+
+    // ========== 端侧决策模式诊断（临时，验证完可移除） ==========
+
+    /**
+     * 运行端侧决策模式 M0 探针：验证 Session（决策）与 Conversation（生成）
+     * 是否共享引擎唯一会话槽位，并实测 prefill / 1 步 decode 延迟。
+     * 端侧模型未加载时返回 null。
+     */
+    suspend fun runDecisionProbe(): String?
+
+    /**
+     * 运行端侧决策模式的离线校准：在固定标注集上跑「原选项顺序」与「置换选项顺序」两轮，
+     * 输出一致率、预测分布（暴露某一档永远选不到的偏置）和位置稳定性，以及混淆矩阵。
+     * 端侧模型未加载时返回 null。
+     */
+    suspend fun runDecisionCalibration(): String?
+
+    /**
+     * 端侧决策执行器。云端模式下返回 null —— 决策模式只在本地模型上启用。
+     * 调用方必须处理 null 并回退到原有生成式路径。
+     */
+    fun getDecisionRunner(): ai.openclaw.android.agent.decision.OnDeviceDecisionRunner?
 }
 
 data class ModelConfig(

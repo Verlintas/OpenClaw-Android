@@ -190,6 +190,13 @@ class PersonalCenterViewModel(
     ): Map<String, Float> {
         if (items.isEmpty()) return emptyMap()
 
+        // 端侧（本地模型）走决策模式：prefill + 1 步 decode，~0.27s/条；
+        // 云端继续走下面的生成式 JSON 评估（决策模式只在本地启用）。
+        val runner = contract.getDecisionRunner()
+        if (runner != null) {
+            return evaluateWithDecision(runner, items)
+        }
+
         val batchText = items.joinToString("\n") { item ->
             "[${item.id}] ${item.sourceApp} | ${item.title} | ${item.body.take(100)}"
         }
@@ -241,6 +248,134 @@ $batchText
             Log.e(TAG, "LLM evaluation failed: ${e.message}")
             emptyMap()
         }
+    }
+
+    // ========== 端侧决策模式评估（P3-1） ==========
+
+    /** 通知价值三分类：下标 → SmartFilter 需要的 0~1 分值 */
+    // 决策表与离线校准共用同一份（agent/decision/DecisionProtocols.NotificationValueDecision），
+    // 避免「校准测的表」和「线上跑的表」各自漂移。改表后务必跑一次 TEST_DECISION_CALIB 对比。
+    private val DECISION_OPTIONS = ai.openclaw.android.agent.decision.NotificationValueDecision.OPTIONS
+    private val DECISION_QUESTION = ai.openclaw.android.agent.decision.NotificationValueDecision.QUESTION
+    private val DECISION_VALUES = ai.openclaw.android.agent.decision.NotificationValueDecision.VALUES
+
+    /**
+     * 决策模式评估。
+     *
+     * 与生成式路径产出同构（Map<id, 0~1>），SmartFilter 主体不用改：
+     * 沿用 `value >= 0.3f` 保留线，因此「无价值」(0.1) 被过滤、其余保留。
+     *
+     * 批次切分：实测 0.27s/条，整批一次跑会在 15s 超时边缘；切成 10 条一批，
+     * 每批独立超时，超时的剩余条目返回 0.5（保留，宁可多显示不可误杀）。
+     */
+    private suspend fun evaluateWithDecision(
+        runner: ai.openclaw.android.agent.decision.OnDeviceDecisionRunner,
+        items: List<CenterItem>,
+    ): Map<String, Float> {
+        val result = mutableMapOf<String, Float>()
+        val batchSize = 10
+        // 实测 0.27s/条：50 条 ≈ 13.5s，会顶到 SmartFilter 的 15s 外层超时。
+        // 这里留 3s 余量，超时的剩余条目返回 0.5（保留，不误杀），下一轮刷新再覆盖。
+        val deadline = System.currentTimeMillis() + 12_000L
+        for (chunk in items.chunked(batchSize)) {
+            if (System.currentTimeMillis() > deadline) {
+                Log.w(TAG, "决策评估到达总截止，剩余 ${items.size - result.size} 条按 0.5 保留")
+                repeat(chunk.size) { result[chunk[it].id] = 0.5f }
+                continue
+            }
+            val batchItems = chunk.map { item ->
+                item.id to "${item.sourceApp} | ${item.title} | ${item.body.take(100)}"
+            }
+            // 显式给足超时：Runner 的默认 4s 是按旧的「批量共享会话」估的
+            // （那时 10 条约 2.7s），改成每条独立会话后实测 371ms/条，
+            // 10 条就要 3.7s，再用 4s 会在大批次上误降级。
+            val results = runner.decideBatch(
+                question = DECISION_QUESTION,
+                options = DECISION_OPTIONS,
+                items = batchItems,
+                timeoutMs = 12_000L,
+            )
+            for (i in chunk.indices) {
+                val idx = results.getOrNull(i)?.chosenIndex
+                // 决策失败/解析不出 → 0.5（保守保留），并落日志供校准统计
+                result[chunk[i].id] = if (idx == null) 0.5f else DECISION_VALUES[idx]
+            }
+            val invalid = results.count { !it.isValid }
+            if (invalid > 0) {
+                Log.w(TAG, "决策评估：本批 ${results.size} 条中 $invalid 条无效，按 0.5 保留")
+            }
+        }
+        Log.d(TAG, "决策评估完成：${result.size} 条，过滤掉 ${result.count { it.value < 0.3f }} 条")
+        return result
+    }
+
+    // ========== 优先级分类的三道闸（见 startMerging Step 4） ==========
+
+    /** 上次 LLM 分类的输入指纹（条目 id 集合） */
+    private var lastPriorityKey: String = ""
+    /** 上次 LLM 分类的输出，按 id 复用 */
+    private var lastPriorityOutput: List<CenterItem> = emptyList()
+    private var lastPriorityAt: Long = 0L
+    /** 两次 LLM 优先级分类之间的最小间隔：端侧一次生成 7~10s，太快就是自激 */
+    private val PRIORITY_MIN_INTERVAL_MS = 60_000L
+
+    private suspend fun classifyPrioritySafely(items: List<CenterItem>): List<CenterItem> {
+        // 兜底线：这个函数抛出的任何异常都会顺着 combine 向上终止整个合并流，
+        // 页面从此永远空白（真机实测过一次 NPE 直接把个人中心打成空列表）。
+        // 所以这里一律不向上抛，最坏情况返回未分类的原列表。
+        return try {
+            classifyPriorityInternal(items)
+        } catch (t: Throwable) {
+            Log.e(TAG, "classifyPrioritySafely 异常，本轮按规则兜底: ${t.message}", t)
+            items
+        }
+    }
+
+    private suspend fun classifyPriorityInternal(items: List<CenterItem>): List<CenterItem> {
+        if (items.isEmpty()) return emptyList()
+
+        Log.d(TAG, "pc-step1: items=${items.size}")
+        val key = items.joinToString("|") { it.id }
+        val cachedById = lastPriorityOutput.associateBy { it.id }
+        Log.d(TAG, "pc-step2: cached=${cachedById.size}")
+
+        // 闸 ①：条目集合没变 → 复用上次分类结果（含新增/删除判定）
+        if (key == lastPriorityKey && lastPriorityOutput.isNotEmpty()) {
+            Log.d(TAG, "Priority classify: 条目未变化，复用上次结果")
+            return items.map { cachedById[it.id] ?: it }
+        }
+
+        // 闸 ②：距上次 LLM 调用不足 60s → 先用规则兜底，不抢占引擎
+        if (lastPriorityOutput.isNotEmpty() &&
+            System.currentTimeMillis() - lastPriorityAt < PRIORITY_MIN_INTERVAL_MS
+        ) {
+            Log.d(TAG, "Priority classify: 距上次调用不足 60s，走规则兜底")
+            return items
+        }
+
+        // 闸 ③：只跑一次，超时/异常都直接走规则兜底（不再重试第二次 LLM）
+        Log.d(TAG, "pc-step3: 调用 classifyBatch，llmClassifier=${PriorityClassifier.llmClassifier != null}")
+        val classifierOut: List<CenterItem>? = try {
+            withTimeout(20_000L) {
+                PriorityClassifier.classifyBatch(items)
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "PriorityClassifier timeout, using rule-based fallback")
+            items
+        } catch (e: Exception) {
+            Log.w(TAG, "PriorityClassifier error: ${e.message}")
+            items
+        }
+        Log.d(TAG, "pc-step4: classifyBatch 返回 ${classifierOut?.size}")
+        val result = classifierOut ?: run {
+            Log.e(TAG, "pc-step4: classifyBatch 返回空引用，整轮按规则兜底")
+            items
+        }
+
+        lastPriorityKey = key
+        lastPriorityAt = System.currentTimeMillis()
+        lastPriorityOutput = result
+        return result
     }
 
     /**
@@ -311,17 +446,13 @@ $batchText
                     Log.d(TAG, "After semantic merge: ${semanticallyMerged.size}")
 
                     // Step 4: LLM 优先级分类
-                    val afterPriorityClassify = try {
-                        withTimeout(20_000L) {
-                            PriorityClassifier.classifyBatch(semanticallyMerged)
-                        }
-                    } catch (e: TimeoutCancellationException) {
-                        Log.w(TAG, "PriorityClassifier timeout, using rule-based fallback")
-                        PriorityClassifier.classifyBatch(semanticallyMerged)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "PriorityClassifier error: ${e.message}")
-                        semanticallyMerged
-                    }
+                    //
+                    // 这里原先每个合并周期（约 5s 一次）都起一次完整生成（端侧实测 7~10s），
+                    // 且超时分支还会再调一次 classifyBatch —— 结果是「上一轮还没跑完、下一轮又起」，
+                    // 推理请求永不停止地压着 native 引擎，是端侧发热/卡顿/间歇性 SIGSEGV 的直接诱因。
+                    // 现在加三道闸：① 条目集合未变 → 直接复用上次结果；② 距上次调用不足 60s → 规则兜底；
+                    // ③ 超时/异常只走规则兜底，不再重试一次 LLM。
+                    val afterPriorityClassify = classifyPrioritySafely(semanticallyMerged)
                     Log.d(TAG, "After priority classify: ${afterPriorityClassify.size}")
 
                     // Step 5: 最低阈值过滤
@@ -342,7 +473,25 @@ $batchText
                     _filteredCount = rawCount - finalItems.size
                     _items.value = finalItems
                     _isLoading.value = false
-                }.collect()
+                }
+                    // 任意一步异常都不应让整页永久空白：重新订阅四个源再来一轮。
+                    // 没有这层时，一次 NPE 就能让 combine 永远停止发射，页面停在空白。
+                    .retryWhen { cause, attempt ->
+                        if (attempt >= 5) {
+                            Log.e(TAG, "合并流连续失败 5 次，放弃重试", cause)
+                            _isLoading.value = false
+                            false
+                        } else {
+                            Log.e(
+                                TAG,
+                                "合并流异常，1s 后重试第 ${attempt + 1} 次: ${cause.message}",
+                                cause
+                            )
+                            delay(1_000L)
+                            true
+                        }
+                    }
+                    .collect()
             } catch (e: Exception) {
                 Log.e(TAG, "startMerging crashed: ${e.message}", e)
                 _isLoading.value = false

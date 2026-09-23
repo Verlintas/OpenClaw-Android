@@ -169,6 +169,13 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
 
     override fun getModelLoadState(): LocalLLMClient.LoadState? = localLLMClient?.getState()
 
+    override suspend fun runDecisionProbe(): String? = localLLMClient?.runDecisionProbe()
+
+    override suspend fun runDecisionCalibration(): String? = localLLMClient?.runDecisionCalibration()
+
+    override fun getDecisionRunner(): ai.openclaw.android.agent.decision.OnDeviceDecisionRunner? =
+        localLLMClient?.decisionRunner
+
     override fun sendMessage(text: String, images: List<ImageContent>?): Flow<SessionEvent> {
         // Multi-agent routing path (primary)
         val router = agentRouter
@@ -273,6 +280,7 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
         ).apply {
             val systemPrompt = AgentPromptLoader.load(service)
             setSystemPrompt(systemPrompt)
+            if (mc is ai.openclaw.android.model.LocalLLMClient) setOnDeviceMode(true)
             setToolsWithSkills(
                 accessTools = accessibilityBridge?.getTools() ?: emptyList(),
                 executor = { toolCall ->
@@ -595,6 +603,9 @@ class GatewayManager(private val service: GatewayService) : GatewayContract {
             modelClient = modelClient!!,
             skillManager = skillManager!!
         ).apply {
+            // 端侧档位必须在 setToolsWithSkills() 之前打开：它决定用精简 system prompt
+            // 还是完整版，以及工具是否收敛到白名单。
+            if (modelClient is ai.openclaw.android.model.LocalLLMClient) setOnDeviceMode(true)
             setToolsWithSkills(
                 accessTools = accessibilityBridge!!.getTools(),
                 executor = { toolCall ->

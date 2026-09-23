@@ -257,6 +257,10 @@ Agent responses use the `[A2UI]...[/A2UI]` markup for rich UI rendering. Support
 - **`Flow` vs `StateFlow`**: `Flow` has no `.value` property; cast to `StateFlow` first.
 - **`ModelClient.configure`**: signature includes `baseUrl` parameter — `configure(provider, apiKey, model, baseUrl)`.
 - **`LocalLLMClient`**: constructor takes `Context` directly, no `getInstance()` singleton.
+- **`LocalLLMClient` 上下文预算**: `maxNumTokens` 是「输入 + 输出」共用的 KV-cache 上限，必须先给生成预留。工具 schema（端侧常注入 50+ 个）和系统提示都要计入预算，否则必然超限 —— 预算分配见 `planContext()`。
+- **`LocalLLMClient` 会话复用**: 主会话复用同一个 `Conversation`（持有 KV cache），只发新增消息；每轮 `createConversation()` + 重放全部历史 = 全量 prefill，是端侧卡顿的主因，不要改回去。历史被裁剪 / 换会话 / system·tools 变化会自动重建。
+- **端侧 CPU 线程**: `Backend.CPU(numOfThreads)` 显式限线程（核数 − 2，2..6）；不指定时 native 会按核心数开满，推理期间整机卡顿。
+- **端侧上下文窗口 ≠ 模型宣传值**: Gemma 4 E2B/E4B 官方卡标称 **128K**，但 `.litertlm` 包的物理 KV-cache 由导出时的 `cache_length` 决定，公开版本（含 litert-community 官方包）普遍是 **4096**。`EngineConfig.maxNumTokens` 只是「申请值」，超过包内容量会 init 失败或 prefill 时炸。因此 `LocalLLMClient` 按「首选值 → 4096 → 2048」逐级降级，实际生效值存在 `effectiveMaxNumTokens`，`getContextWindowTokens()` 返回它。SDK 无 API 可查询包内 cache_length（javap 确认），只能靠初始化试。**不要**再写死窗口常量。
 - **`MessageDao`**: use `getMessagesBySessionIdWithLimit(sessionId, limit, offset)`, not `getBySession`.
 - **`sendMessage`** signature is now `(String, List<ImageContent>)` — all call sites must pass both parameters.
 - **`ChatScreen`** `sendMessage` callback uses `(String, List<ImageContent>)` — update tests with `{ _, _ -> }`.

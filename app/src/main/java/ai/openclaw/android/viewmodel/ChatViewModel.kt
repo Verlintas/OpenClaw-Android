@@ -27,6 +27,8 @@ import ai.openclaw.android.ui.ConfirmRequest
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +47,12 @@ class ChatViewModel : ViewModel() {
 
     companion object {
         private const val TAG = "ChatViewModel"
+
+        /**
+         * 流式 token 合并窗口。端侧推理会把 CPU 吃满，此时主线程每收到一个 token 就
+         * 重排整个消息列表会明显掉帧；合并到 ~16 fps 再推给 UI 能明显缓解。
+         */
+        private const val TOKEN_FLUSH_INTERVAL_MS = 80L
     }
 
     // ==================== 聊天消息状态 ====================
@@ -344,8 +352,12 @@ class ChatViewModel : ViewModel() {
         _messages.value = msgs
         val responseIndex = msgs.lastIndex
 
-        gateway.sendMessage(text, images.ifEmpty { null }).collect { event ->
-            handleSessionEvent(event, responseIndex)
+        try {
+            gateway.sendMessage(text, images.ifEmpty { null }).collect { event ->
+                handleSessionEvent(event, responseIndex)
+            }
+        } finally {
+            flushPendingToken()
         }
     }
 
@@ -366,19 +378,60 @@ class ChatViewModel : ViewModel() {
         _messages.value = msgs
         val responseIndex = msgs.lastIndex
 
-        contract.sendMessage(text, images.ifEmpty { null }).collect { event ->
-            handleSessionEvent(event, responseIndex)
+        try {
+            contract.sendMessage(text, images.ifEmpty { null }).collect { event ->
+                handleSessionEvent(event, responseIndex)
+            }
+        } finally {
+            flushPendingToken()
         }
+    }
+
+    // ==================== 流式 token 合并 ====================
+
+    private val pendingToken = StringBuilder()
+    private var pendingTokenIndex = -1
+    private var tokenFlushJob: Job? = null
+    private var lastTokenFlushAt = 0L
+
+    /** 把累积的 token 一次性写回消息列表 */
+    private fun flushPendingToken() {
+        tokenFlushJob?.cancel()
+        tokenFlushJob = null
+        if (pendingToken.isEmpty()) return
+        val idx = pendingTokenIndex
+        val text = pendingToken.toString()
+        pendingToken.clear()
+        lastTokenFlushAt = System.currentTimeMillis()
+        if (idx < 0) return
+        val updated = _messages.value.toMutableList()
+        if (idx >= updated.size) return
+        val current = updated[idx]
+        updated[idx] = current.copy(content = current.content + text)
+        _messages.value = updated
     }
 
     /** 统一处理 SessionEvent */
     private suspend fun handleSessionEvent(event: SessionEvent, responseIndex: Int) {
+        // 非 token 事件（工具提示、完成等）必须先落盘，避免与累积的 token 乱序
+        if (event !is SessionEvent.Token) flushPendingToken()
+
         when (event) {
             is SessionEvent.Token -> {
-                val updated = _messages.value.toMutableList()
-                val current = updated[responseIndex]
-                updated[responseIndex] = current.copy(content = current.content + event.text)
-                _messages.value = updated
+                if (pendingTokenIndex != responseIndex) {
+                    flushPendingToken()
+                    pendingTokenIndex = responseIndex
+                }
+                pendingToken.append(event.text)
+                val now = System.currentTimeMillis()
+                if (now - lastTokenFlushAt >= TOKEN_FLUSH_INTERVAL_MS) {
+                    flushPendingToken()
+                } else if (tokenFlushJob == null) {
+                    tokenFlushJob = viewModelScope.launch {
+                        delay(TOKEN_FLUSH_INTERVAL_MS)
+                        flushPendingToken()
+                    }
+                }
             }
             is SessionEvent.ToolExecuting -> {
                 val updated = _messages.value.toMutableList()

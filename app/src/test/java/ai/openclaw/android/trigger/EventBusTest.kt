@@ -264,6 +264,8 @@ class EventBusTest {
         )
 
         eventBus.publish(event1)
+        // 只清冷却绕开 MIN_COOLDOWN_MS 地板（生产策略），去重缓存保留 —— 本测的是去重语义
+        eventBus.clearCooldowns()
         eventBus.publish(event2)
 
         coVerify(exactly = 2) { mockActionExecutor.execute(any(), any()) }
@@ -285,6 +287,8 @@ class EventBusTest {
         )
 
         eventBus.publish(event)
+        // 只清冷却绕开 MIN_COOLDOWN_MS 地板（生产策略）—— 无 dedupKey 的事件本就不进去重缓存
+        eventBus.clearCooldowns()
         eventBus.publish(event)
 
         // Same payload but no dedupKey → both execute

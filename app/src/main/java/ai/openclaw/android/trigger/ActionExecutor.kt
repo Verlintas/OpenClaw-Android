@@ -132,13 +132,63 @@ class ActionExecutor(
     }
 
     /**
+     * 同一时刻只允许一个「规则驱动的 Agent 查询」在跑。
+     *
+     * 端侧模型一次推理要 5~12 秒、吃掉 84% CPU 和 1.7GB 常驻。多条规则各自匹配同一事件时，
+     * 若并发调用，端侧引擎会被同时拉起多份，整机直接卡死（外加 OOM 风险）。
+     * 拿不到许可就直接跳过，不排队 —— 后台触发器不该堆积任务。
+     *
+     * TODO: agentSessionFactory 目前返回的是 GatewayManager 的共享主会话，
+     * 规则的每轮对话会写进用户的主会话历史（实测 historySize 从 10 涨到 17）。
+     * 理想做法是给触发器独立会话，但那会 new 一个新的 LocalLLMClient（重新加载 2.5GB 模型），
+     * 需要复用引擎实例后再改。
+     */
+    private val agentQueryPermit = java.util.concurrent.Semaphore(1, true)
+
+    /**
+     * 全局闸门：所有规则驱动的 Agent 查询之间至少间隔这么久。
+     *
+     * 单规则的冷却（EventBus.MIN_COOLDOWN_MS = 60s）只能限制同一条规则，
+     * 但一个事件常常同时命中 3～4 条规则，它们会轮流点火，把间隔又压回 15～20 秒。
+     * 端侧一次推理 5～12 秒、84% CPU，这个闸门把占空比压到 ~5%，
+     * 是「自激循环」的最后一道保险。
+     *
+     * 需要更激进/宽松时改这一个常量即可。
+     */
+    private val AGENT_QUERY_MIN_INTERVAL_MS = 120_000L
+    private val lastAgentQueryAt = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
      * 执行 AgentQuery — 向 AI 发送查询
      */
     private suspend fun executeAgentQuery(
         action: TriggerAction.AgentQuery,
         event: TriggerEvent
     ): ActionResult = withContext(Dispatchers.IO) {
+        if (!agentQueryPermit.tryAcquire()) {
+            Log.w(TAG, "AgentQuery skipped: another trigger-driven query is running")
+            return@withContext ActionResult(
+                success = false,
+                error = "已有规则触发的 Agent 查询在执行，本次跳过（避免端侧模型被并发拉起）"
+            )
+        }
         try {
+            // 全局频率闸门：与上一次规则驱动的推理间隔过短就直接放弃
+            val now = System.currentTimeMillis()
+            val last = lastAgentQueryAt.get()
+            if (last != 0L && now - last < AGENT_QUERY_MIN_INTERVAL_MS) {
+                Log.w(
+                    TAG,
+                    "AgentQuery throttled: only ${now - last}ms since last run " +
+                        "(min ${AGENT_QUERY_MIN_INTERVAL_MS}ms)"
+                )
+                return@withContext ActionResult(
+                    success = false,
+                    error = "端侧推理过于频繁，本次跳过（距上次仅 ${(now - last) / 1000}s）"
+                )
+            }
+            lastAgentQueryAt.set(now)
+
             val prompt = interpolatePrompt(action.prompt, event)
 
             val session = agentSessionFactory()
@@ -156,6 +206,8 @@ class ActionExecutor(
         } catch (e: Exception) {
             Log.e(TAG, "AgentQuery failed: ${e.message}", e)
             ActionResult(success = false, error = e.message)
+        } finally {
+            agentQueryPermit.release()
         }
     }
 

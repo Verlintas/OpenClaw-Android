@@ -59,6 +59,26 @@ class AgentSession(
     private var responseRouter: ResponseRouter? = null
 
     /**
+     * 是否运行在「端侧档位」（本地模型）。
+     *
+     * 端侧窗口实测只有 8192，而完整 system prompt 是 9245 token —— 必须换成
+     * [OnDeviceProfile.SYSTEM_PROMPT] 精简版，否则每轮都要截断，历史前缀随之变化，
+     * KV-cache 复用失效、每轮全量 prefill。工具也要同步收敛到白名单
+     * （[OnDeviceProfile.TOOL_WHITELIST]），光砍 prompt 不砍工具没用。
+     *
+     * 由 [ai.openclaw.android.domain.agent.AgentSessionManager] 在识别出 modelClient 是
+     * LocalLLMClient 后调用，必须早于 `setToolsWithSkills()`。
+     */
+    @Volatile
+    var onDeviceMode: Boolean = false
+        private set
+
+    fun setOnDeviceMode(enabled: Boolean) {
+        onDeviceMode = enabled
+        Log.i(TAG, "On-device profile ${if (enabled) "ENABLED" else "disabled"}")
+    }
+
+    /**
      * Set device capabilities for response routing.
      * Call this after initialization to enable LLM format decisions.
      */
@@ -550,9 +570,26 @@ Example:
                 prefixes.any { prefix -> tool.function.name.startsWith("${prefix}_") }
             }
         }
-        this.tools = accessTools + skillTools
+        // 端侧档位：先把 60+ 个工具收敛到白名单。
+        // 这一步必须在 accessTools + skillTools 合并之后做 —— 无障碍工具和技能工具各占一块预算。
+        val allTools = accessTools + skillTools
+        val (finalTools, dropped) = if (onDeviceMode) {
+            OnDeviceProfile.filterTools(allTools)
+        } else {
+            allTools to emptyList()
+        }
+
+        this.tools = finalTools
         this.toolExecutor = executor
-        Log.d(TAG, "Loaded ${accessTools.size} accessibility + ${skillTools.size} skill = ${this.tools.size} tools")
+        if (onDeviceMode) {
+            Log.i(
+                TAG,
+                "LOCAL profile: ${finalTools.size}/${allTools.size} tools kept " +
+                    "(dropped ${dropped.size}): ${finalTools.map { it.function.name }}"
+            )
+        } else {
+            Log.d(TAG, "Loaded ${accessTools.size} accessibility + ${skillTools.size} skill = ${this.tools.size} tools")
+        }
     }
 
     /**
@@ -585,8 +622,15 @@ Example:
             }
         }
         val allTools = accessibilityTools + skillTools
-        setTools(allTools, currentExecutor)
-        Log.d(TAG, "Tools refreshed: ${allTools.size} total (${skillTools.size} skill tools)")
+        // 与 setToolsWithSkills 保持一致：端侧档位在这里也要收敛到白名单，
+        // 否则动态技能注册一次就把刚砍掉的工具全请回来。
+        val finalTools = if (onDeviceMode) {
+            OnDeviceProfile.filterTools(allTools).first
+        } else {
+            allTools
+        }
+        setTools(finalTools, currentExecutor)
+        Log.d(TAG, "Tools refreshed: ${finalTools.size} kept of ${allTools.size} (${skillTools.size} skill tools)")
     }
 
     // ==================== Memory & Persistence Setup ====================
@@ -1087,9 +1131,16 @@ Example:
 
     /** 进入每轮消息列表头部的系统块：system prompt + 记忆上下文 */
     private fun buildSystemMessages(): List<Message> {
+        // 端侧走精简档：完整版 9245 token > E2B 窗口 8192，等于每轮必截断
+        val builtinPrompt = if (onDeviceMode) {
+            OnDeviceProfile.SYSTEM_PROMPT
+        } else {
+            BASE_SYSTEM_PROMPT
+        }
+
         val basePrompt = _agentConfig?.systemPrompt?.takeIf { it.isNotBlank() }
-            ?.let { customPrompt -> "$customPrompt\n\n---\n$BASE_SYSTEM_PROMPT" }
-            ?: BASE_SYSTEM_PROMPT
+            ?.let { customPrompt -> "$customPrompt\n\n---\n$builtinPrompt" }
+            ?: builtinPrompt
 
         val systemPrompt = deviceCapabilities?.let { caps ->
             "${caps.toPromptSection()}\n\n---\n$basePrompt"

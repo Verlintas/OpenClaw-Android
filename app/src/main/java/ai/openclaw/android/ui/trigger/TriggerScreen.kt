@@ -64,6 +64,12 @@ fun TriggerScreen(
     // Toast 消息
     val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(Unit) {
+        // 进入页面时必须主动拉一次：ViewModel 构造后 rules/recentLogs 都是空列表，
+        // 此前这里只 collect toast，导致 UI 永远显示「0 个规则 / 0 条日志」，
+        // 而 EventBus 实际上正在执行库里的规则（用户看不到、也关不掉）。
+        viewModel.loadRules()
+        viewModel.loadRecentLogs()
+
         viewModel.toastMessage.collect { msg ->
             // Toast 会通过 Snackbar 或其他方式展示
         }

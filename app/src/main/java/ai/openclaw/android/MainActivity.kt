@@ -176,6 +176,40 @@ class MainActivity : ComponentActivity() {
                             Log.d("MainActivity", "[TEST A2UI] Received JSON: $a2uiJson")
                             chatViewModel.testInjectA2UI(a2uiJson)
                         }
+                        "ai.openclaw.android.TEST_DECISION_PROBE" -> {
+                            Log.i("MainActivity", "[DECISION PROBE] 触发 M0 探针")
+                            activityScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val report = try {
+                                    gatewayContract?.runDecisionProbe() ?: "PROBE_ABORT: gateway not bound"
+                                } catch (e: Exception) {
+                                    "PROBE_ERROR: ${e.javaClass.simpleName}: ${e.message}"
+                                }
+                                Log.i("MainActivity", "[DECISION PROBE]\n$report")
+                            }
+                        }
+                        "ai.openclaw.android.TEST_PC_DIAG" -> {
+                            Log.i("MainActivity", "[PC DIAG] 触发个人中心数据源诊断")
+                            activityScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val report = try {
+                                    ai.openclaw.android.personalcenter.PersonalCenterDiag.run(this@MainActivity)
+                                } catch (e: Exception) {
+                                    "DIAG_ERROR: ${e.javaClass.simpleName}: ${e.message}"
+                                }
+                                Log.i("MainActivity", "[PC DIAG]\n$report")
+                            }
+                        }
+                        "ai.openclaw.android.TEST_DECISION_CALIB" -> {
+                            Log.i("MainActivity", "[DECISION CALIB] 触发决策模式校准")
+                            activityScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val report = try {
+                                    gatewayContract?.runDecisionCalibration()
+                                        ?: "CALIB_ABORT: 端侧模型未加载（校准只在本地模型上可用）"
+                                } catch (e: Exception) {
+                                    "CALIB_ERROR: ${e.javaClass.simpleName}: ${e.message}"
+                                }
+                                Log.i("MainActivity", "[DECISION CALIB]\n$report")
+                            }
+                        }
                         "ai.openclaw.android.INJECT_A2UI_TEST" -> {
                             try {
                                 var a2uiJson = intent.getStringExtra("a2ui_json")
@@ -206,6 +240,9 @@ class MainActivity : ComponentActivity() {
             addAction("ai.openclaw.android.DEBUG_SEND_MESSAGE")
             addAction("ai.openclaw.android.TEST_A2UI_JSON")
             addAction("ai.openclaw.android.INJECT_A2UI_TEST")
+            addAction("ai.openclaw.android.TEST_DECISION_PROBE")
+            addAction("ai.openclaw.android.TEST_DECISION_CALIB")
+            addAction("ai.openclaw.android.TEST_PC_DIAG")
         }
         registerReceiver(testReceiver, testFilter, Context.RECEIVER_EXPORTED)
 

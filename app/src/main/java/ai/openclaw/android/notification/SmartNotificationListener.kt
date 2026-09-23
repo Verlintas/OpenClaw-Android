@@ -245,6 +245,17 @@ class SmartNotificationListener : NotificationListenerService() {
     }
     
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        // 【关键】不处理 OpenClaw 自己发出的通知。
+        //
+        // 触发器动作（NotificationReply 的 sendLocalReply、各类技能的提醒）会调用
+        // notificationManager.notify()，这些通知又会被本监听器捕获并 publish 到 EventBus，
+        // 与「通知 → 规则 → AgentQuery → 本地 LLM → 工具 → 通知」形成闭环，
+        // 端侧模型会被无限拉起（实测整机 84% CPU）。断掉这一边。
+        if (sbn.packageName == packageName) {
+            Log.d(TAG, "Ignoring self-posted notification: ${sbn.key}")
+            return
+        }
+
         val notification = parseNotification(sbn)
         if (notification != null) {
             scope.launch {

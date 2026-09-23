@@ -1,5 +1,6 @@
 package ai.openclaw.android.domain.memory
 
+import android.util.Log
 import ai.openclaw.android.data.model.MessageEntity
 import ai.openclaw.android.data.model.MemoryEntity
 import ai.openclaw.android.data.model.MemoryType
@@ -14,16 +15,27 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonElement
 
 class LlmMemoryExtractor(private val llmClient: LocalLLMClient) : MemoryExtractorInterface {
-    
+
+    private val TAG = "LlmMemoryExtractor"
+
     override suspend fun extractFromConversation(
         messages: List<MessageEntity>
     ): Result<List<MemoryEntity>> = runCatching {
         if (messages.isEmpty()) return@runCatching emptyList()
-        
+
         val conversation = messages.takeLast(10).joinToString("\n") {
             "${it.role}: ${it.content}"
         }
-        
+
+        // P3-2 决策门：先问一句「这段对话值不值得长期记忆」（prefill + 1 步 decode，~0.3s）。
+        // 判定为「不值得」就直接跳过全量抽取 —— 既省一次生成，也避免走 chat() 旁路
+        // 把主会话的 KV-cache 作废（chat() 因引擎单会话槽位必须先 closeCachedConversation）。
+        // 决策本身不可用（引擎未加载/解析失败）时按「值得」处理，保持原行为。
+        if (!worthRemembering(conversation)) {
+            Log.i(TAG, "记忆门判定：本轮无可记忆内容，跳过抽取")
+            return@runCatching emptyList()
+        }
+
         val prompt = "${MemoryExtractionPrompts.SYSTEM_PROMPT}\n\n对话：\n$conversation"
         
         val response = llmClient.chat(
@@ -33,6 +45,34 @@ class LlmMemoryExtractor(private val llmClient: LocalLLMClient) : MemoryExtracto
         parseMemories(response.content ?: "")
     }
     
+    /**
+     * 决策门：这段对话是否含值得长期记忆的信息。
+     * true = 值得（继续抽取）；false = 不值得（跳过）。
+     *
+     * 保守原则：决策不可用时返回 true（继续原路径），不引入新的漏记风险。
+     */
+    private suspend fun worthRemembering(conversation: String): Boolean {
+        return try {
+            val result = llmClient.decisionRunner.decide(
+                ai.openclaw.android.agent.decision.DecisionRequest(
+                    id = "memory_gate",
+                    state = conversation.take(1200),
+                    question = "这段对话里有没有值得长期记住的用户信息（偏好、事实、承诺、计划）？",
+                    options = listOf(
+                        "没有，纯闲聊或一次性问答，无需记忆",
+                        "有，包含用户的偏好/事实/承诺/计划"
+                    ),
+                    stakes = ai.openclaw.android.agent.decision.DecisionStakes.LOW,
+                )
+            )
+            // parsed=0 → 不值得；parsed=1 → 值得；无效 → 值得（保守）
+            result.chosenIndex != 0
+        } catch (e: Exception) {
+            Log.w(TAG, "记忆决策门失败，按「值得」继续抽取: ${e.message}")
+            true
+        }
+    }
+
     override suspend fun extractFromUserInput(
         content: String,
         type: MemoryType?
